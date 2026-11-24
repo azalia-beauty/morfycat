@@ -1,0 +1,17 @@
+{
+  "appId": "com.morphin.morfy",
+  "appName": "morfy",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  },
+  "backgroundColor": "#06090d",
+  "android": {
+    "backgroundColor": "#06090d"
+  }
+}

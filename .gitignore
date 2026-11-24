@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+android/
+.ghost-backup/
+*.log
+.DS_Store
+
+# Ключ подписи Android — НИКОГДА не коммитить
+ANDROID-KEY-SECRETS.txt
+*.keystore
+*.jks

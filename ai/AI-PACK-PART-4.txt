@@ -1,0 +1,848 @@
+ЧАСТЬ 4 ИЗ 5. Это не весь контекст: просто отвечай «принято», жди следующую часть.
+
+
+===== src/modules/home.js =====
+import { h, panel, kv, fmtBytes, eyeIcon } from '../core/ui.js';
+import { APP_NAME, AUTHOR } from '../core/config.js';
+import { invoke } from '../core/bridge.js';
+
+const PLATFORM_NAME = { win: 'Windows', android: 'Android', web: 'Браузер' };
+
+export default {
+  id: 'home',
+  title: 'Главная',
+  icon: '◈',
+  order: 0,
+
+  async mount(root, ctx) {
+    const clock = h('div', { class: 'clock' });
+    const tick = () => { clock.textContent = new Date().toLocaleTimeString('ru-RU'); };
+    tick();
+    const timer = setInterval(tick, 1000);
+
+    const info = kv([
+      ['Версия', ctx.version],
+      ['Платформа', PLATFORM_NAME[ctx.platform] || ctx.platform],
+      ['Модулей', String(ctx.modules.length)],
+    ]);
+    if (ctx.platform === 'win') {
+      try {
+        const s = await invoke('system:info');
+        info.add('Хост', s.hostname);
+        info.add('ОС', s.release + ' · ' + s.arch);
+        info.add('Процессор', s.cpu + ' ×' + s.cores);
+        info.add('Память', fmtBytes(s.totalmem));
+      } catch { /* не критично */ }
+    } else {
+      info.add('Экран', screen.width + '×' + screen.height);
+      info.add('Язык', navigator.language);
+    }
+
+    const tiles = h('div', { class: 'grid' },
+      ctx.modules.filter((m) => m.id !== 'home').map((m, i) =>
+        h('button', { class: 'tile', type: 'button', 'data-n': String(i + 1).padStart(2, '0'), onclick: () => ctx.go(m.id) },
+          h('span', { class: 'tile__ico' }, m.icon),
+          h('span', { class: 'tile__t' }, m.title),
+          m.desc ? h('span', { class: 'tile__d' }, m.desc) : null)));
+
+    root.append(
+      h('div', { class: 'hero' },
+        eyeIcon('hero__eye'),
+        h('div', {},
+          h('div', { class: 'hero__tag' }, 'система активна'),
+          h('div', { class: 'hero__big glitch', 'data-text': APP_NAME }, APP_NAME),
+          clock,
+          h('div', { class: 'hero__sub' }, 'сделано ', h('b', {}, AUTHOR)))),
+      panel('Система', info),
+      panel('Модули', tiles));
+
+    return () => clearInterval(timer);
+  },
+};
+
+===== src/modules/modules.js =====
+import { h, panel } from '../core/ui.js';
+
+const SNIPPET = `// src/modules/мой-модуль.js — просто положите файл, больше ничего менять не нужно
+import { h, panel, button } from '../core/ui.js';
+
+export default {
+  id: 'my',
+  title: 'Мой модуль',
+  icon: '★',
+  order: 100,
+  mount(root, ctx) {
+    root.append(panel('Привет', button('Нажми', () => alert('ok'))));
+  },
+};`;
+
+export default {
+  id: 'modules',
+  title: 'Модули',
+  icon: '⧉',
+  order: 95,
+  desc: 'Что загружено и как добавить своё',
+
+  mount(root, ctx) {
+    const { mods, failed, skipped } = ctx.registry;
+
+    const rows = mods.map((m) => h('tr', {},
+      h('td', {}, m.icon + ' ' + m.title), h('td', {}, m.file), h('td', {}, (m.platforms || ['все']).join(', '))));
+
+    root.append(
+      panel('Загружено: ' + mods.length,
+        h('div', { style: { overflowX: 'auto' } }, h('table', { class: 'table' },
+          h('thead', {}, h('tr', {}, ['Модуль', 'Файл', 'Платформы'].map((t) => h('th', {}, t)))), h('tbody', {}, rows)))),
+      failed.length ? h('div', { class: 'panel panel--bad' },
+        h('div', { class: 'panel__title' }, 'Ошибки загрузки: ' + failed.length),
+        h('div', { class: 'panel__body' }, failed.map((f) => h('div', {}, h('b', {}, f.file), ' — ', f.error)))) : null,
+      skipped.length ? panel('Пропущено на этой платформе: ' + skipped.length,
+        skipped.map((s) => h('div', { class: 'dim' }, s.file + ' (нужно: ' + s.platforms.join(', ') + ')'))) : null,
+      panel('Как добавить модуль',
+        h('p', { class: 'dim small' }, 'Создайте файл в папке src/modules/ — он появится в меню автоматически. Шаблон: _template.js. Для Windows-функций (доступ к системе) добавьте такой же файл в electron/modules/*.cjs.'),
+        h('pre', { class: 'out' }, SNIPPET)));
+  },
+};
+
+===== src/modules/netinfo.js =====
+// Сетевые инструменты: свой IP, информация об IP, DNS (через DoH), WHOIS (через RDAP).
+// Работают на всех платформах — запросы идут через ctx.bridge.http (без проблем с CORS).
+
+import { h, panel, button, field, kv, copy } from '../core/ui.js';
+import { httpJson } from '../core/bridge.js';
+
+const DNS_TYPES = { 1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 15: 'MX', 16: 'TXT', 28: 'AAAA', 33: 'SRV', 257: 'CAA' };
+
+function busy(btn, on) { btn.disabled = on; btn.dataset.l = btn.dataset.l || btn.textContent; btn.textContent = on ? '…' : btn.dataset.l; }
+
+async function withBusy(btn, box, fn) {
+  busy(btn, true);
+  box.replaceChildren(h('span', { class: 'dim' }, 'Запрос…'));
+  try { box.replaceChildren(await fn()); }
+  catch (e) { box.replaceChildren(h('span', { class: 'err' }, 'Ошибка: ' + ((e && e.message) || e))); }
+  finally { busy(btn, false); }
+}
+
+function renderIp(j) {
+  if (j.success === false) throw new Error(j.message || 'не удалось определить');
+  const el = kv([
+    ['IP', j.ip], ['Тип', j.type],
+    ['Страна', [j.flag && j.flag.emoji, j.country].filter(Boolean).join(' ')],
+    ['Регион / город', [j.region, j.city].filter(Boolean).join(', ')],
+    ['Координаты', j.latitude != null ? j.latitude + ', ' + j.longitude : '—'],
+    ['Провайдер', j.connection ? j.connection.isp : '—'],
+    ['Организация', j.connection ? j.connection.org : '—'],
+    ['ASN', j.connection ? 'AS' + j.connection.asn : '—'],
+    ['Часовой пояс', j.timezone ? j.timezone.id : '—'],
+  ]);
+  return el;
+}
+
+function renderDns(j, name) {
+  if (!j.Answer || !j.Answer.length) return h('span', { class: 'dim' }, 'Записей нет (код ответа ' + j.Status + ')');
+  return h('table', { class: 'table' },
+    h('thead', {}, h('tr', {}, ['Имя', 'Тип', 'TTL', 'Значение'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, j.Answer.map((a) => h('tr', {},
+      h('td', {}, a.name || name), h('td', {}, DNS_TYPES[a.type] || a.type), h('td', {}, String(a.TTL)), h('td', {}, a.data)))));
+}
+
+function renderRdap(j) {
+  const ev = (name) => { const e = (j.events || []).find((x) => x.eventAction === name); return e ? new Date(e.eventDate).toLocaleString('ru-RU') : '—'; };
+  const reg = (j.entities || []).find((e) => (e.roles || []).includes('registrar'));
+  let regName = '—';
+  if (reg && reg.vcardArray) { const fn = reg.vcardArray[1].find((r) => r[0] === 'fn'); if (fn) regName = fn[3]; }
+  return kv([
+    ['Домен', j.ldhName],
+    ['Статус', (j.status || []).join(', ')],
+    ['Зарегистрирован', ev('registration')],
+    ['Истекает', ev('expiration')],
+    ['Обновлён', ev('last changed')],
+    ['Регистратор', regName],
+    ['NS', (j.nameservers || []).map((n) => n.ldhName).join(', ')],
+  ]);
+}
+
+export default {
+  id: 'netinfo',
+  title: 'Сеть и DNS',
+  icon: '◎',
+  order: 40,
+  desc: 'IP, DNS, WHOIS',
+
+  mount(root) {
+    // — Мой IP / любой IP
+    const ipIn = h('input', { placeholder: 'пусто = мой IP; или 8.8.8.8', spellcheck: 'false' });
+    const ipOut = h('div', { class: 'mt' });
+    const ipBtn = button('Узнать', () => withBusy(ipBtn, ipOut, async () => renderIp(await httpJson('https://ipwho.is/' + encodeURIComponent(ipIn.value.trim())))), 'primary');
+    ipIn.addEventListener('keydown', (e) => e.key === 'Enter' && ipBtn.click());
+
+    // — DNS
+    const dnsIn = h('input', { placeholder: 'example.com', spellcheck: 'false' });
+    const dnsType = h('select', {}, ['A', 'AAAA', 'MX', 'TXT', 'NS', 'CNAME', 'SOA', 'CAA'].map((t) => h('option', { value: t }, t)));
+    const dnsOut = h('div', { class: 'mt', style: { overflowX: 'auto' } });
+    const dnsBtn = button('Запросить', () => {
+      const name = dnsIn.value.trim();
+      if (!name) return;
+      withBusy(dnsBtn, dnsOut, async () => renderDns(await httpJson(
+        'https://cloudflare-dns.com/dns-query?name=' + encodeURIComponent(name) + '&type=' + dnsType.value,
+        { headers: { accept: 'application/dns-json' } }), name));
+    }, 'primary');
+    dnsIn.addEventListener('keydown', (e) => e.key === 'Enter' && dnsBtn.click());
+
+    // — WHOIS / RDAP
+    const whIn = h('input', { placeholder: 'example.com', spellcheck: 'false' });
+    const whOut = h('div', { class: 'mt' });
+    const whBtn = button('Найти', () => {
+      const d = whIn.value.trim().toLowerCase();
+      if (!d) return;
+      withBusy(whBtn, whOut, async () => renderRdap(await httpJson('https://rdap.org/domain/' + encodeURIComponent(d), { headers: { accept: 'application/rdap+json' } })));
+    }, 'primary');
+    whIn.addEventListener('keydown', (e) => e.key === 'Enter' && whBtn.click());
+
+    root.append(
+      panel('IP-адрес', h('div', { class: 'row' }, h('div', { class: 'grow' }, field('IP', ipIn)), ipBtn), ipOut),
+      panel('DNS (через DNS-over-HTTPS)', h('div', { class: 'row' }, h('div', { class: 'grow' }, field('Домен', dnsIn)), field('Тип', dnsType), dnsBtn), dnsOut),
+      panel('WHOIS (RDAP)', h('div', { class: 'row' }, h('div', { class: 'grow' }, field('Домен', whIn)), whBtn), whOut),
+    );
+    ipBtn.click(); // сразу показываем «мой IP»
+  },
+};
+
+===== src/modules/portscan.js =====
+// Сканер локальной сети: найти устройства (ARP) и проверить открытые порты на СВОИХ устройствах.
+// Порт-сканер намеренно работает только с локальными адресами (192.168.x.x, 10.x.x.x, 172.16–31.x.x, 127.x.x.x) —
+// это жёсткое ограничение в electron/modules/netscan.cjs, а не только здесь.
+
+import { h, panel, button, field, toast } from '../core/ui.js';
+import { invoke, on } from '../core/bridge.js';
+
+const SERVICES = {
+  21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS', 80: 'HTTP', 110: 'POP3', 135: 'RPC', 139: 'NetBIOS',
+  143: 'IMAP', 443: 'HTTPS', 445: 'SMB', 554: 'RTSP', 631: 'IPP', 1883: 'MQTT', 3306: 'MySQL', 3389: 'RDP',
+  5000: 'UPnP/Flask', 5353: 'mDNS', 5432: 'PostgreSQL', 5555: 'ADB', 5900: 'VNC', 8000: 'HTTP-alt',
+  8080: 'HTTP-proxy', 8443: 'HTTPS-alt', 9100: 'Printer', 62078: 'iPhone-sync',
+};
+
+const PRESETS = {
+  'Популярные': '21,22,23,25,53,80,110,135,139,143,443,445,554,631,1883,3306,3389,5000,5432,5555,5900,8000,8080,8443,9100',
+  '1–1024': '1-1024',
+  '1–10000': '1-10000',
+};
+
+export default {
+  id: 'portscan',
+  title: 'LAN-сканер',
+  icon: '⌖',
+  order: 50,
+  desc: 'Устройства и порты в вашей сети',
+  platforms: ['win'],
+
+  mount(root) {
+    const hostIn = h('input', { placeholder: '192.168.0.10', spellcheck: 'false' });
+    const portsIn = h('input', { value: PRESETS['Популярные'], spellcheck: 'false' });
+    const devBody = h('tbody');
+    const devNote = h('div', { class: 'small dim' }, 'Нажмите «Найти устройства», чтобы увидеть, кто есть в сети.');
+    const resBody = h('tbody');
+    const bar = h('div', { class: 'bar' }, h('i'));
+    const status = h('div', { class: 'small dim mt' }, '');
+
+    const offProg = on('net:progress', ({ done, total, open }) => {
+      bar.firstChild.style.width = Math.round((done / total) * 100) + '%';
+      status.textContent = 'Проверено ' + done + ' из ' + total + ', открытых: ' + open;
+    });
+
+    const findBtn = button('Найти устройства', async () => {
+      findBtn.disabled = true; devNote.textContent = 'Опрашиваю сеть…';
+      try {
+        const r = await invoke('net:lan');
+        devNote.textContent = r.subnet ? 'Подсеть ' + r.subnet + ' · найдено: ' + r.devices.length : 'Найдено: ' + r.devices.length;
+        devBody.replaceChildren(...r.devices.map((d) => h('tr', { class: 'click', onclick: () => { hostIn.value = d.ip; scrollTo(0, 0); } },
+          h('td', {}, d.ip), h('td', {}, d.mac), h('td', {}, d.name || '—'))));
+      } catch (e) { devNote.textContent = 'Ошибка: ' + (e.message || e); }
+      findBtn.disabled = false;
+    }, 'primary');
+
+    const scanBtn = button('Сканировать порты', async () => {
+      const host = hostIn.value.trim();
+      if (!host) { toast('Укажите адрес устройства', 'bad'); return; }
+      scanBtn.disabled = true; resBody.replaceChildren(); bar.firstChild.style.width = '0';
+      status.textContent = 'Старт…';
+      try {
+        const r = await invoke('net:portscan', { host, ports: portsIn.value });
+        status.textContent = 'Готово за ' + (r.ms / 1000).toFixed(1) + ' с · проверено ' + r.total + ' · открыто ' + r.open.length;
+        resBody.replaceChildren(...(r.open.length ? r.open.map((p) => h('tr', {},
+          h('td', { class: 'ok' }, String(p)), h('td', {}, SERVICES[p] || '—')))
+          : [h('tr', {}, h('td', { colspan: 2, class: 'dim' }, 'Открытых портов не найдено'))]));
+      } catch (e) { status.textContent = 'Ошибка: ' + (e.message || e); status.className = 'small err mt'; }
+      scanBtn.disabled = false;
+    }, 'primary');
+
+    const chips = h('div', { class: 'chips' }, Object.entries(PRESETS).map(([name, v]) =>
+      h('button', { class: 'chip', type: 'button', onclick: () => { portsIn.value = v; } }, name)));
+
+    root.append(
+      panel('Устройства в сети',
+        h('div', { class: 'row' }, findBtn), h('div', { class: 'mt' }, devNote),
+        h('div', { style: { overflowX: 'auto' } }, h('table', { class: 'table' },
+          h('thead', {}, h('tr', {}, ['IP', 'MAC', 'Имя'].map((t) => h('th', {}, t)))), devBody))),
+      panel('Порты',
+        h('div', { class: 'small dim' }, 'Только локальные адреса: ваши устройства и ваша сеть.'),
+        h('div', { class: 'row mt' }, h('div', { class: 'grow' }, field('Адрес', hostIn)), h('div', { class: 'grow' }, field('Порты (22,80,8000-8100)', portsIn)), scanBtn),
+        h('div', { class: 'mt' }, chips), h('div', { class: 'mt' }, bar), status,
+        h('table', { class: 'table mt' }, h('thead', {}, h('tr', {}, ['Порт', 'Служба'].map((t) => h('th', {}, t)))), resBody)));
+
+    return () => offProg();
+  },
+};
+
+===== src/modules/profile.js =====
+// Профиль: имя, аватар (из файла, буфера, генератора или от ИИ) и цвет оформления.
+import { h, panel, button, field, toast, copy } from '../core/ui.js';
+import { getProfile, setProfile, fileToAvatar, svgToAvatar, generatedAvatar } from '../core/profile.js';
+import { buildAvatarImagePrompt, buildAvatarSvgPrompt, AVATAR_SYSTEM } from '../core/aiprompt.js';
+import { ask, isConfigured } from '../core/llm.js';
+
+const COLORS = ['#2ee6ff', '#6dff8a', '#ff3b5c', '#ffb020', '#b58cff', '#ff6bd6', '#ffffff'];
+
+export default {
+  id: 'profile',
+  title: 'Профиль',
+  icon: '☻',
+  order: 5,
+  desc: 'Имя, ава и цвет оформления',
+
+  mount(root) {
+    const p = getProfile();
+    const preview = h('img', { class: 'ava', alt: 'ава' });
+    const empty = h('div', { class: 'ava ava--empty' }, 'нет авы');
+    const paint = () => { const a = getProfile().avatar; preview.hidden = !a; empty.hidden = !!a; if (a) preview.src = a; };
+    paint();
+
+    const apply = async (make, okText) => {
+      try { setProfile({ avatar: await make() }); paint(); toast(okText || 'Ава обновлена'); }
+      catch (e) { toast(String((e && e.message) || e).slice(0, 200), 'bad'); }
+    };
+
+    // — имя и цвет
+    const name = h('input', { value: p.name, maxlength: 24, spellcheck: 'false' });
+    const color = h('input', { type: 'color', value: p.accent });
+    color.addEventListener('input', () => setProfile({ accent: color.value }));
+    const chips = h('div', { class: 'chips' }, COLORS.map((c) => h('button', {
+      class: 'chip', type: 'button', style: { color: c, borderColor: c }, onclick: () => { color.value = c; setProfile({ accent: c }); },
+    }, c)));
+
+    // — источники авы
+    const file = h('input', { type: 'file', accept: 'image/*' });
+    file.addEventListener('change', () => { const f = file.files[0]; file.value = ''; if (f) apply(() => fileToAvatar(f)); });
+
+    const seed = h('input', { placeholder: 'слово или пусто — случайная', spellcheck: 'false' });
+    const desc = h('textarea', { placeholder: 'Что нарисовать? Например: «лис-хакер в капюшоне, глитч, неон». Можно оставить пустым.', style: { minHeight: '70px' } });
+    const svgIn = h('textarea', { class: 'code', placeholder: 'Вставьте сюда SVG-код, который прислал ИИ (целиком ответ — нужный кусок найдётся сам)', style: { minHeight: '110px' }, spellcheck: 'false' });
+    const st = h('div', { class: 'small dim mt' });
+    const aiGen = button('Нарисовать здесь (SVG)', async () => {
+      aiGen.disabled = true; st.className = 'small dim mt'; st.textContent = 'ИИ рисует…';
+      try {
+        const svg = await ask([{ role: 'user', content: buildAvatarSvgPrompt({ desc: desc.value, accent: getProfile().accent }) }], { system: AVATAR_SYSTEM, maxTokens: 6000 });
+        svgIn.value = svg;
+        await apply(() => svgToAvatar(svg), 'Ава от ИИ готова');
+        st.textContent = '';
+      } catch (e) { st.className = 'small err mt'; st.textContent = 'Ошибка: ' + ((e && e.message) || e); }
+      aiGen.disabled = false;
+    }, 'primary');
+    aiGen.hidden = !isConfigured();
+
+    // вставка картинки из буфера и перетаскивание
+    const onPaste = (e) => {
+      const it = [...(e.clipboardData ? e.clipboardData.items : [])].find((i) => i.type.startsWith('image/'));
+      if (it) { e.preventDefault(); apply(() => fileToAvatar(it.getAsFile()), 'Ава вставлена из буфера'); }
+    };
+    document.addEventListener('paste', onPaste);
+    root.addEventListener('dragover', (e) => e.preventDefault());
+    root.addEventListener('drop', (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files[0];
+      if (f) { e.preventDefault(); apply(() => fileToAvatar(f), 'Ава загружена'); }
+    });
+
+    root.append(
+      panel('Профиль',
+        h('div', { class: 'row', style: { alignItems: 'center' } },
+          preview, empty,
+          h('div', { class: 'grow' },
+            field('Имя', name),
+            h('div', { class: 'row mt' }, button('Сохранить имя', () => { setProfile({ name: name.value.trim() || 'Оператор' }); toast('Сохранено'); }, 'primary'),
+              button('Убрать аву', () => { setProfile({ avatar: '' }); paint(); }, 'ghost')))),
+        h('div', { class: 'mt' }, field('Цвет оформления', h('div', { class: 'row' }, color, h('div', { class: 'grow' }, chips))))),
+      panel('Аватар: свой файл',
+        h('div', { class: 'small dim' }, 'Выберите картинку, перетащите её в окно или нажмите Ctrl+V с картинкой в буфере — она обрежется в квадрат автоматически.'),
+        h('div', { class: 'mt' }, file)),
+      panel('Аватар: генератор (без ИИ и интернета)',
+        h('div', { class: 'row' },
+          h('div', { class: 'grow' }, field('Слово-зерно', seed)),
+          button('Сгенерировать', () => apply(async () => generatedAvatar(seed.value.trim() || Math.random(), getProfile().accent), 'Новая ава'), 'primary'))),
+      panel('Аватар: через ИИ',
+        h('div', { class: 'small dim' }, 'Вариант А: любой ИИ, умеющий рисовать картинки — скопируйте промт, получите картинку и загрузите её файлом выше. Вариант Б: любой текстовый ИИ рисует SVG-кодом — скопируйте SVG-промт, вставьте ответ в поле ниже.'),
+        h('div', { class: 'mt' }, field('Описание (по желанию)', desc)),
+        h('div', { class: 'row mt' },
+          button('Промт для картинки', () => copy(buildAvatarImagePrompt({ desc: desc.value, accent: getProfile().accent }))),
+          button('Промт для SVG', () => copy(buildAvatarSvgPrompt({ desc: desc.value, accent: getProfile().accent }))),
+          aiGen),
+        h('div', { class: 'mt' }, field('SVG от ИИ', svgIn)),
+        h('div', { class: 'row mt' }, button('Применить SVG', () => { if (!svgIn.value.trim()) { toast('Вставьте SVG', 'bad'); return; } apply(() => svgToAvatar(svgIn.value), 'Ава из SVG готова'); }, 'primary')),
+        st));
+
+    return () => document.removeEventListener('paste', onPaste);
+  },
+};
+
+===== src/modules/studio.js =====
+// Студия: добавляйте и меняйте функции прямо в приложении.
+// Путь 1: описать задачу → скопировать промт → вставить в ЛЮБОЙ ИИ → вставить ответ сюда → «Установить».
+// Путь 2: подключить ключ ИИ → нажать «Сгенерировать здесь» → «Установить».
+// Установка не требует пересборки: плагин сохраняется в приложении и подгружается при запуске.
+
+import { h, panel, button, field, toast, copy } from '../core/ui.js';
+import { buildPluginPrompt, PLUGIN_SYSTEM } from '../core/aiprompt.js';
+import { listPlugins, extractCode, validate, installPlugin, removePlugin, setEnabled } from '../core/plugins.js';
+import { ask, PRESETS, getLlm, saveLlm, isConfigured } from '../core/llm.js';
+import { lsSet } from '../core/store.js';
+
+const TABS = [['create', 'Создать'], ['mine', 'Мои функции'], ['ai', 'ИИ-подключение']];
+
+function download(name, text) {
+  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'text/javascript' })), download: name });
+  document.body.append(a); a.click(); a.remove();
+}
+
+async function readFile(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  return f ? f.text() : '';
+}
+
+export default {
+  id: 'studio',
+  title: 'Студия',
+  icon: '✦',
+  order: 8,
+  desc: 'Добавлять функции через ИИ — без пересборки',
+
+  mount(root, ctx) {
+    const builtinIds = ctx.registry.builtinIds;
+    const body = h('div');
+    let tab = 'create';
+    const tabs = h('div', { class: 'tabs' });
+
+    const paintTabs = () => tabs.replaceChildren(...TABS.map(([id, label]) =>
+      h('button', { class: 'tab' + (tab === id ? ' is-on' : ''), type: 'button', onclick: () => { tab = id; paint(); } }, label)));
+
+    /* ───────── установка из текста ───────── */
+    async function installFrom(text, onDone) {
+      try {
+        const code = extractCode(text);
+        const m = await validate(code, { builtinIds });
+        const desc = [
+          'Установить функцию «' + (m.title || m.id) + '» (id: ' + m.id + ')?',
+          m.platforms ? 'Платформы: ' + m.platforms.join(', ') : 'Платформы: все',
+          /ctx\.sh\s*\(/.test(code) ? '⚠ Код выполняет команды на вашем компьютере (ctx.sh).' : '',
+          /ctx\.ai\.|bridge\.http|\bfetch\s*\(/.test(code) ? '⚠ Код обращается к сети.' : '',
+          '',
+          'Плагин получает те же права, что и приложение. Ставьте только код, который вы заказали сами.',
+        ].filter((x) => x !== '' || true).join('\n');
+        if (!confirm(desc)) return;
+        const rec = await installPlugin(code, builtinIds);
+        toast('Установлено: ' + rec.title + '. Перезагружаю…');
+        setTimeout(() => { location.hash = '#/' + rec.id; location.reload(); }, 700);
+        if (onDone) onDone(rec);
+      } catch (e) {
+        toast(String((e && e.message) || e).slice(0, 300), 'bad');
+        throw e;
+      }
+    }
+
+    /* ───────── вкладка «Создать» ───────── */
+    function paintCreate() {
+      const task = h('textarea', { placeholder: 'Например: «показывать курс доллара и евро с обновлением раз в минуту» или «кнопка, которая очищает временные файлы Windows»', style: { minHeight: '110px' } });
+      const platform = h('select', {},
+        h('option', { value: 'both' }, 'Windows и Android'), h('option', { value: 'win' }, 'Только Windows'), h('option', { value: 'android' }, 'Только Android'));
+      const status = h('div', { class: 'small dim mt' });
+      const paste = h('textarea', { class: 'code', placeholder: 'Вставьте сюда ответ ИИ целиком (можно с пояснениями — код найдётся сам) или загрузите файл .js / .txt / .md', spellcheck: 'false' });
+      const file = h('input', { type: 'file', accept: '.js,.mjs,.txt,.md,text/*' });
+      file.addEventListener('change', async () => { paste.value = await readFile(file); });
+
+      const prompt = (compact) => buildPluginPrompt({ task: task.value, platform: platform.value, existingIds: [...builtinIds], compact });
+
+      const gen = button('Сгенерировать здесь', async () => {
+        if (!task.value.trim()) { toast('Сначала опишите задачу', 'bad'); return; }
+        gen.disabled = true; status.className = 'small dim mt'; status.textContent = 'ИИ пишет код… (до пары минут)';
+        try {
+          paste.value = await ask([{ role: 'user', content: prompt(false) }], { system: PLUGIN_SYSTEM });
+          status.className = 'small ok mt'; status.textContent = 'Готово. Проверьте код ниже и нажмите «Проверить и установить».';
+        } catch (e) { status.className = 'small err mt'; status.textContent = 'Ошибка: ' + ((e && e.message) || e); }
+        gen.disabled = false;
+      }, 'primary');
+      gen.hidden = !isConfigured();
+
+      body.replaceChildren(
+        panel('1. Что должна делать функция?',
+          field('Описание', task),
+          h('div', { class: 'row mt' }, field('Платформа', platform)),
+          h('div', { class: 'row mt' },
+            button('Скопировать промт для ИИ', () => {
+              if (!task.value.trim()) { toast('Сначала опишите задачу', 'bad'); return; }
+              copy(prompt(false));
+            }, 'primary'),
+            button('Короткий промт', () => { if (!task.value.trim()) { toast('Сначала опишите задачу', 'bad'); return; } copy(prompt(true)); }),
+            gen),
+          h('div', { class: 'small dim mt' }, 'Промт — обычный текст: вставьте его в любой чат с ИИ (ChatGPT, Gemini, Claude, DeepSeek, Алиса и т.д.). Файлы и вложения не нужны. Если ИИ ответил слишком длинно или оборвал код — напишите ему «пришли файл полностью одним блоком кода».'),
+          status),
+        panel('2. Ответ ИИ',
+          paste,
+          h('div', { class: 'row mt' }, h('div', { class: 'grow' }, field('…или файл с ответом', file)),
+            button('Проверить и установить', async () => {
+              if (!paste.value.trim()) { toast('Вставьте ответ ИИ', 'bad'); return; }
+              try { await installFrom(paste.value); } catch { /* сообщение уже показано */ }
+            }, 'primary')),
+          h('div', { class: 'small dim mt' }, 'Перед установкой код проверяется: загружается ли он, есть ли id и mount. Если что-то не так — понятное сообщение и ничего не ломается.')));
+    }
+
+    /* ───────── вкладка «Мои функции» ───────── */
+    function paintMine() {
+      const list = listPlugins();
+      const rows = list.length ? list.map((p) => {
+        const editor = h('div', { hidden: true });
+        const toggleEditor = (mode) => {
+          editor.hidden = false;
+          const code = h('textarea', { class: 'code', spellcheck: 'false' }); code.value = p.code;
+          const req = h('textarea', { placeholder: 'Что изменить? Например: «добавь кнопку экспорта» или «исправь ошибку: …»', style: { minHeight: '70px' } });
+          const st = h('div', { class: 'small dim mt' });
+          const improve = () => buildPluginPrompt({ task: req.value, platform: 'both', currentCode: code.value, existingIds: [...builtinIds], compact: true });
+          const gen = button('Улучшить здесь', async () => {
+            if (!req.value.trim()) { toast('Опишите, что изменить', 'bad'); return; }
+            gen.disabled = true; st.className = 'small dim mt'; st.textContent = 'ИИ дорабатывает…';
+            try { code.value = extractCode(await ask([{ role: 'user', content: improve() }], { system: PLUGIN_SYSTEM })); st.className = 'small ok mt'; st.textContent = 'Готово — проверьте и сохраните.'; }
+            catch (e) { st.className = 'small err mt'; st.textContent = 'Ошибка: ' + ((e && e.message) || e); }
+            gen.disabled = false;
+          });
+          gen.hidden = !isConfigured();
+          editor.replaceChildren(
+            h('div', { class: 'mt' }, field('Доработать через ИИ', req)),
+            h('div', { class: 'row mt' },
+              button('Промт для ИИ (с текущим кодом)', () => { if (!req.value.trim()) { toast('Опишите, что изменить', 'bad'); return; } copy(improve()); }), gen),
+            h('div', { class: 'mt' }, field('Код (можно править вручную или вставить новый ответ ИИ)', code)),
+            h('div', { class: 'row mt' },
+              button('Сохранить', async () => { try { await installFrom(code.value); } catch { /* показано */ } }, 'primary'),
+              button('Закрыть', () => { editor.hidden = true; }, 'ghost')),
+            st);
+        };
+        return h('div', { class: 'plug' + (p.enabled ? '' : ' plug--off') },
+          h('div', { class: 'plug__head' },
+            h('span', { class: 'plug__name' }, p.title), h('span', { class: 'dim small' }, p.id + ' · ' + new Date(p.updated).toLocaleDateString('ru-RU')),
+            h('span', { class: 'sp' }),
+            button(p.enabled ? 'Выключить' : 'Включить', () => { setEnabled(p.id, !p.enabled); location.reload(); }, 'ghost'),
+            button('Изменить / доработать', () => toggleEditor()),
+            button('Скачать .js', () => download(p.id + '.js', p.code), 'ghost'),
+            button('Удалить', () => { if (confirm('Удалить функцию «' + p.title + '»? Её данные тоже пропадут.')) { removePlugin(p.id); location.hash = '#/studio'; location.reload(); } }, 'danger')),
+          editor);
+      }) : [h('div', { class: 'dim' }, 'Пока нет своих функций. Создайте первую на вкладке «Создать».')];
+
+      const failed = ctx.registry.failed.filter((f) => f.file.startsWith('плагин'));
+      body.replaceChildren(
+        panel('Установленные функции: ' + list.length, rows),
+        failed.length ? h('div', { class: 'panel panel--bad' },
+          h('div', { class: 'panel__title' }, 'Не загрузились'),
+          h('div', { class: 'panel__body' }, failed.map((f) => h('div', {}, h('b', {}, f.file), ' — ', f.error)))) : null,
+        panel('Безопасность',
+          h('div', { class: 'small dim' }, 'Если плагин что-то сломал и приложение не стартует, оно само запустится в безопасном режиме (свои функции отключены) — здесь их можно удалить.'),
+          h('div', { class: 'row mt' }, button('Включить безопасный режим', () => { lsSet('safe', true); location.reload(); }, 'ghost'))));
+    }
+
+    /* ───────── вкладка «ИИ-подключение» ───────── */
+    function paintAi() {
+      const s = getLlm();
+      const preset = h('select', {}, Object.entries(PRESETS).map(([k, p]) => h('option', { value: k, selected: s.preset === k }, p.label)));
+      const base = h('input', { value: s.base, spellcheck: 'false' });
+      const model = h('input', { value: s.model, spellcheck: 'false', placeholder: 'название модели' });
+      const key = h('input', { type: 'password', value: s.key, placeholder: 'ключ API', autocomplete: 'off' });
+      const hint = h('div', { class: 'small dim' });
+      const out = h('div', { class: 'small mt' });
+      const sync = () => { const p = PRESETS[preset.value]; hint.textContent = p.hint; };
+      preset.addEventListener('change', () => { const p = PRESETS[preset.value]; base.value = p.base; model.value = p.model; sync(); });
+      sync();
+      const save = () => saveLlm({ preset: preset.value, base: base.value.trim(), model: model.value.trim(), key: key.value.trim() });
+      body.replaceChildren(
+        panel('Подключить ИИ (необязательно)',
+          h('div', { class: 'small dim' }, 'Без этого всё работает через «Скопировать промт → вставить ответ». С ключом приложение пишет код и рисует авы само. Ключ хранится только на этом устройстве и отправляется только выбранному сервису.'),
+          h('div', { class: 'row mt' }, h('div', { class: 'grow' }, field('Сервис', preset)), h('div', { class: 'grow' }, field('Модель', model))),
+          h('div', { class: 'mt' }, field('Адрес API', base)),
+          h('div', { class: 'mt' }, field('Ключ', key)), h('div', { class: 'mt' }, hint),
+          h('div', { class: 'row mt' },
+            button('Сохранить', () => { save(); toast('Сохранено'); paintTabsAndKeep(); }, 'primary'),
+            button('Проверить связь', async () => {
+              save(); out.className = 'small dim mt'; out.textContent = 'Спрашиваю…';
+              try { const t = await ask([{ role: 'user', content: 'Ответь одним словом: готов' }], { maxTokens: 30 }); out.className = 'small ok mt'; out.textContent = 'Связь есть. Ответ: ' + t.slice(0, 80); }
+              catch (e) { out.className = 'small err mt'; out.textContent = String((e && e.message) || e); }
+            })),
+          out));
+    }
+
+    const paintTabsAndKeep = () => { /* кнопки «Сгенерировать здесь» читают isConfigured при открытии вкладки */ };
+
+    function paint() {
+      paintTabs();
+      if (tab === 'create') paintCreate(); else if (tab === 'mine') paintMine(); else paintAi();
+    }
+
+    root.append(tabs, body);
+    paint();
+  },
+};
+
+===== src/modules/sysmon.js =====
+import { h, panel, kv, fmtBytes, fmtUptime, drawSpark } from '../core/ui.js';
+import { invoke } from '../core/bridge.js';
+
+const N = 60; // сколько секунд истории
+
+export default {
+  id: 'sysmon',
+  title: 'Мониторинг',
+  icon: '▤',
+  order: 30,
+  desc: 'CPU, память, процессы',
+  platforms: ['win'],
+
+  async mount(root) {
+    const cpuH = [], memH = [];
+    const cpuCv = h('canvas', { class: 'spark', width: 640, height: 90 });
+    const memCv = h('canvas', { class: 'spark', width: 640, height: 90 });
+    const cpuLbl = h('span', { class: 'acc' }, '—');
+    const memLbl = h('span', { class: 'acc' }, '—');
+    const sys = kv();
+    const tbody = h('tbody');
+
+    const info = await invoke('system:info');
+    sys.add('Хост', info.hostname + ' (' + info.user + ')');
+    sys.add('ОС', info.release + ' · ' + info.arch);
+    sys.add('Процессор', info.cpu + ' ×' + info.cores);
+    const upEl = h('span', {}, '—');
+    sys.add('Аптайм', upEl);
+    (info.ifaces || []).forEach((i) => sys.add(i.name, i.address + '  ' + i.mac));
+
+    root.append(
+      h('div', { class: 'grid', style: { gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' } },
+        panel('Процессор', h('div', { class: 'small dim' }, 'Загрузка: ', cpuLbl), cpuCv),
+        panel('Память', h('div', { class: 'small dim' }, 'Занято: ', memLbl), memCv)),
+      panel('Система', sys),
+      panel('Топ процессов по памяти',
+        h('div', { style: { overflowX: 'auto' } },
+          h('table', { class: 'table' },
+            h('thead', {}, h('tr', {}, ['Процесс', 'PID', 'Память'].map((t) => h('th', {}, t)))), tbody))));
+
+    let alive = true;
+    async function tick() {
+      try {
+        const s = await invoke('system:stats');
+        if (!alive) return;
+        const memPct = Math.round((1 - s.free / s.total) * 100);
+        cpuH.push(s.cpu); memH.push(memPct);
+        if (cpuH.length > N) { cpuH.shift(); memH.shift(); }
+        cpuLbl.textContent = s.cpu + '%';
+        memLbl.textContent = memPct + '%  (' + fmtBytes(s.total - s.free) + ' из ' + fmtBytes(s.total) + ')';
+        upEl.textContent = fmtUptime(s.uptime);
+        drawSpark(cpuCv, cpuH, { color: '#2ee6ff' });
+        drawSpark(memCv, memH, { color: '#6dff8a' });
+      } catch { /* пропускаем тик */ }
+    }
+    async function procs() {
+      try {
+        const list = await invoke('system:top');
+        if (!alive) return;
+        tbody.replaceChildren(...list.map((p) => h('tr', {}, h('td', {}, p.Name), h('td', {}, String(p.Id)), h('td', {}, fmtBytes(p.WorkingSet64)))));
+      } catch { /* ignore */ }
+    }
+
+    await tick(); procs();
+    const t1 = setInterval(tick, 1000);
+    const t2 = setInterval(procs, 4000);
+    return () => { alive = false; clearInterval(t1); clearInterval(t2); };
+  },
+};
+
+===== src/modules/terminal.js =====
+import { h, panel, button } from '../core/ui.js';
+import { invoke, on } from '../core/bridge.js';
+
+const QUICK = ['ipconfig /all', 'netstat -ano', 'tasklist', 'systeminfo', 'whoami /all', 'arp -a'];
+
+export default {
+  id: 'terminal',
+  title: 'Терминал',
+  icon: '>_',
+  order: 20,
+  desc: 'PowerShell и cmd',
+  platforms: ['win'],
+
+  async mount(root) {
+    let cwd = await invoke('terminal:home');
+    let shell = 'powershell';
+    let running = null;
+    const history = [];
+    let hi = 0;
+
+    const out = h('pre', { class: 'term__out' });
+    const prompt = h('span', { class: 'term__prompt' });
+    const input = h('input', { class: 'term__in', spellcheck: 'false', autocomplete: 'off', placeholder: 'введите команду и Enter…' });
+    const stop = button('Стоп', () => running && invoke('terminal:kill', { id: running }), 'danger');
+    stop.hidden = true;
+
+    const setPrompt = () => { prompt.textContent = (shell === 'cmd' ? '' : 'PS ') + cwd + '>'; };
+    const print = (text, cls = '') => {
+      out.append(h('span', { class: cls }, text));
+      while (out.childNodes.length > 3000) out.firstChild.remove();
+      out.scrollTop = out.scrollHeight;
+    };
+    const finish = (note) => {
+      running = null;
+      input.disabled = false;
+      stop.hidden = true;
+      if (note) print(note, 'dim');
+      input.focus();
+    };
+
+    const offData = on('terminal:data', ({ id, text, err }) => { if (id === running) print(text, err ? 'err' : ''); });
+    const offExit = on('terminal:exit', ({ id, code }) => { if (id === running) finish('\n[код выхода: ' + code + ']\n'); });
+
+    async function run(raw) {
+      const cmd = raw.trim();
+      if (!cmd || running) return;
+      history.push(cmd);
+      hi = history.length;
+      print(prompt.textContent + ' ' + cmd + '\n', 'cmdline');
+
+      if (/^(cls|clear)$/i.test(cmd)) { out.replaceChildren(); return; }
+      const cd = cmd.match(/^cd(?:\s+(.*))?$/i);
+      if (cd) {
+        try { cwd = await invoke('terminal:cd', { cwd, target: cd[1] || '~' }); setPrompt(); }
+        catch (e) { print((e.message || e) + '\n', 'err'); }
+        return;
+      }
+
+      const id = 'r' + Date.now();
+      running = id;
+      input.disabled = true;
+      stop.hidden = false;
+      try { await invoke('terminal:run', { id, shell, cmd, cwd }); }
+      catch (e) { finish('\n' + (e.message || e) + '\n'); }
+    }
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { const v = input.value; input.value = ''; run(v); }
+      else if (e.key === 'ArrowUp') { if (hi > 0) input.value = history[--hi]; e.preventDefault(); }
+      else if (e.key === 'ArrowDown') { hi = Math.min(hi + 1, history.length); input.value = history[hi] || ''; e.preventDefault(); }
+    });
+
+    const sel = h('select', { style: { width: 'auto' }, onchange: (e) => { shell = e.target.value; setPrompt(); } },
+      h('option', { value: 'powershell' }, 'PowerShell'), h('option', { value: 'cmd' }, 'cmd'));
+
+    const chips = h('div', { class: 'chips' }, QUICK.map((c) =>
+      h('button', { class: 'chip', type: 'button', onclick: () => run(c) }, c)));
+
+    root.append(panel('Консоль',
+      h('div', { class: 'row' }, sel, h('div', { class: 'grow' }, chips), stop, button('Очистить', () => out.replaceChildren(), 'ghost')),
+      h('div', { class: 'term mt' }, out, h('div', { class: 'term__bar' }, prompt, input))));
+
+    setPrompt();
+    print('Терминал. Каждая команда выполняется отдельно; cd, cls и стрелки ↑↓ работают.\n', 'dim');
+    input.focus();
+
+    return () => { offData(); offExit(); if (running) invoke('terminal:kill', { id: running }); };
+  },
+};
+
+===== src/modules/toolbox.js =====
+// Набор оффлайн-инструментов: кодирование, хэши, JWT, генераторы. Работает везде, интернет не нужен.
+// Чтобы добавить свой инструмент — допишите объект в массив TOOLS (id, name, run).
+// run(текст) может вернуть строку или Promise со строкой.
+
+import { h, panel, button, field, copy, toast } from '../core/ui.js';
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const toHex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+const digest = (alg) => async (s) => toHex(await crypto.subtle.digest(alg, enc.encode(s)));
+
+const b64e = (s) => { let bin = ''; enc.encode(s).forEach((b) => { bin += String.fromCharCode(b); }); return btoa(bin); };
+const b64d = (s) => {
+  const bin = atob(s.trim().replace(/-/g, '+').replace(/_/g, '/'));
+  return dec.decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+};
+
+const TOOLS = [
+  { id: 'b64e', name: 'Base64 ▶', run: b64e },
+  { id: 'b64d', name: '◀ Base64', run: b64d },
+  { id: 'hexe', name: 'Текст ▶ HEX', run: (s) => [...enc.encode(s)].map((b) => b.toString(16).padStart(2, '0')).join(' ') },
+  { id: 'hexd', name: 'HEX ▶ текст', run: (s) => dec.decode(Uint8Array.from((s.replace(/[^0-9a-f]/gi, '').match(/../g) || []), (x) => parseInt(x, 16))) },
+  { id: 'bin', name: 'Текст ▶ BIN', run: (s) => [...enc.encode(s)].map((b) => b.toString(2).padStart(8, '0')).join(' ') },
+  { id: 'urle', name: 'URL encode', run: (s) => encodeURIComponent(s) },
+  { id: 'urld', name: 'URL decode', run: (s) => decodeURIComponent(s) },
+  { id: 'sha1', name: 'SHA-1', run: digest('SHA-1') },
+  { id: 'sha256', name: 'SHA-256', run: digest('SHA-256') },
+  { id: 'sha512', name: 'SHA-512', run: digest('SHA-512') },
+  { id: 'rot13', name: 'ROT13', run: (s) => s.replace(/[a-z]/gi, (c) => String.fromCharCode((c <= 'Z' ? 90 : 122) >= (c = c.charCodeAt(0) + 13) ? c : c - 26)) },
+  {
+    id: 'jwt', name: 'JWT ▶ JSON',
+    run: (s) => {
+      const [hd, pl] = s.trim().split('.');
+      return JSON.stringify({ header: JSON.parse(b64d(hd)), payload: JSON.parse(b64d(pl)) }, null, 2);
+    },
+  },
+];
+
+function randomPassword(len, sets) {
+  const pools = {
+    lower: 'abcdefghijkmnopqrstuvwxyz', upper: 'ABCDEFGHJKLMNPQRSTUVWXYZ', digits: '23456789', symbols: '!@#$%^&*-_=+?',
+  };
+  const chars = Object.keys(sets).filter((k) => sets[k]).map((k) => pools[k]).join('') || pools.lower;
+  const buf = new Uint32Array(len);
+  crypto.getRandomValues(buf);
+  return [...buf].map((n) => chars[n % chars.length]).join('');
+}
+
+export default {
+  id: 'toolbox',
+  title: 'Тулбокс',
+  icon: '⚒',
+  order: 60,
+  desc: 'Кодеки, хэши, JWT, пароли',
+
+  mount(root) {
+    const input = h('textarea', { placeholder: 'Вставьте текст…', spellcheck: 'false' });
+    const output = h('pre', { class: 'out' }, '');
+    const chips = h('div', { class: 'chips' }, TOOLS.map((t) =>
+      h('button', {
+        class: 'chip', type: 'button',
+        onclick: async () => {
+          try { output.textContent = await t.run(input.value); output.className = 'out'; }
+          catch (e) { output.textContent = 'Ошибка: ' + ((e && e.message) || e); output.className = 'out err'; }
+        },
+      }, t.name)));
+
+    // — генератор паролей
+    const len = h('input', { type: 'number', min: 6, max: 128, value: 20, style: { width: '90px' } });
+    const sets = { lower: true, upper: true, digits: true, symbols: true };
+    const checks = Object.keys(sets).map((k) => h('label', { class: 'chip is-on', style: { cursor: 'pointer' } },
+      h('input', { type: 'checkbox', checked: true, style: { width: 'auto', marginRight: '6px' }, onchange: (e) => { sets[k] = e.target.checked; } }),
+      { lower: 'a–z', upper: 'A–Z', digits: '0–9', symbols: '#$%' }[k]));
+    const pass = h('pre', { class: 'out' }, '');
+    const gen = () => { pass.textContent = randomPassword(Math.min(128, Math.max(6, +len.value || 20)), sets); };
+
+    root.append(
+      panel('Преобразования', field('Вход', input), h('div', { class: 'mt' }, chips),
+        h('div', { class: 'mt' }, output), h('div', { class: 'row mt' }, button('Копировать результат', () => copy(output.textContent)))),
+      panel('Генераторы',
+        h('div', { class: 'row' }, field('Длина', len), h('div', { class: 'chips' }, checks), button('Пароль', gen, 'primary'),
+          button('UUID', () => { pass.textContent = crypto.randomUUID(); }), button('32 байта HEX', () => { pass.textContent = toHex(crypto.getRandomValues(new Uint8Array(32))); })),
+        h('div', { class: 'mt' }, pass), h('div', { class: 'row mt' }, button('Копировать', () => { copy(pass.textContent); toast('Скопировано'); }, 'ghost'))));
+    gen();
+  },
+};

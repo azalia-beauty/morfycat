@@ -1,0 +1,843 @@
+ЧАСТЬ 2 ИЗ 5. Это не весь контекст: просто отвечай «принято», жди следующую часть.
+
+
+===== scripts/add-module.mjs =====
+// «Докинуть код»: берёт ответ ИИ (из файла, буфера обмена или stdin), находит в нём файлы и кладёт куда нужно.
+//
+//   node scripts/add-module.mjs ответ.txt        из файла
+//   node scripts/add-module.mjs --clip           из буфера обмена
+//   node scripts/add-module.mjs -                из stdin
+//
+// Что понимает:
+//  • один блок кода с export default { id, … }  → src/modules/<id>.js
+//  • один блок кода с module.exports { handlers } → electron/modules/<имя>.cjs
+//  • несколько блоков, у каждого первой строкой «// FILE: путь/к/файлу» → кладёт по указанным путям
+// Перед записью проверяет синтаксис; существующие файлы сохраняет в .ghost-backup/.
+import { execFileSync, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const root = process.cwd();
+const args = process.argv.slice(2);
+const dry = args.includes('--dry');
+const src = args.find((a) => !a.startsWith('--') || a === '-');
+const clip = args.includes('--clip');
+
+const fail = (m) => { console.error('\n✗ ' + m + '\n'); process.exit(1); };
+
+function readClipboard() {
+  const tries = process.platform === 'win32'
+    ? [['powershell', ['-NoProfile', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw']]]
+    : process.platform === 'darwin' ? [['pbpaste', []]] : [['wl-paste', []], ['xclip', ['-selection', 'clipboard', '-o']], ['xsel', ['-b']]];
+  for (const [cmd, a] of tries) {
+    const r = spawnSync(cmd, a, { encoding: 'utf8' });
+    if (r.status === 0 && r.stdout) return r.stdout;
+  }
+  return '';
+}
+
+function readInput() {
+  if (clip) return readClipboard();
+  if (src === '-') return fs.readFileSync(0, 'utf8');
+  if (src) { if (!fs.existsSync(src)) fail('Файл не найден: ' + src); return fs.readFileSync(src, 'utf8'); }
+  fail('Укажите файл с ответом ИИ, или --clip (буфер обмена), или - (stdin).');
+}
+
+const text = readInput().replace(/^﻿/, '');
+if (!text.trim()) fail('Пусто: нечего добавлять. Скопируйте ответ ИИ и повторите.');
+
+// — блоки кода
+let blocks = [...text.matchAll(/```[\w+-]*[ \t]*\r?\n([\s\S]*?)```/g)].map((m) => m[1]);
+if (!blocks.length) {
+  const open = /```[\w+-]*[ \t]*\r?\n([\s\S]*)$/.exec(text);
+  blocks = [open ? open[1] : text];
+}
+
+const ALLOWED = [/^src\/[\w./-]+\.(js|css)$/, /^electron\/[\w./-]+\.cjs$/, /^scripts\/[\w./-]+\.(mjs|sh|ps1)$/, /^android-plugin\/[\w./-]+$/];
+const FILE_RE = /^\s*(?:\/\/|#|\/\*|<!--)\s*FILE:\s*(\S+)/i;
+
+const plan = [];
+for (const raw of blocks) {
+  const code = raw.replace(/\r\n/g, '\n').trim() + '\n';
+  const m = FILE_RE.exec(code.split('\n')[0]);
+  let rel = m && m[1].replace(/\\/g, '/').replace(/^\.?\//, '');
+  if (!rel) {
+    if (/module\.exports/.test(code)) {
+      const first = /['"]([a-z]+):[\w-]+['"]\s*:/.exec(code);
+      rel = 'electron/modules/' + (first ? first[1] : 'custom' + Date.now()) + '.cjs';
+    } else if (/export\s+default/.test(code)) {
+      const id = (/\bid:\s*['"]([a-z][a-z0-9-]*)['"]/.exec(code) || [])[1];
+      if (!id) fail('В коде нет id модуля (id: \'имя\').');
+      rel = 'src/modules/' + id + '.js';
+    } else { console.warn('• пропускаю блок без FILE и без export default / module.exports'); continue; }
+  }
+  const abs = path.resolve(root, rel);
+  if (!abs.startsWith(root + path.sep) || rel.includes('..') || !ALLOWED.some((re) => re.test(rel))) {
+    console.warn('• пропускаю «' + rel + '»: сюда автоматически писать нельзя (package.json, .github и т.п. правьте вручную)');
+    continue;
+  }
+  plan.push({ rel, abs, code });
+}
+if (!plan.length) fail('Не нашёл, что добавлять.');
+
+// — проверка синтаксиса и формы модуля до записи
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-add-'));
+for (const f of plan) {
+  const ext = f.rel.endsWith('.cjs') ? '.cjs' : f.rel.endsWith('.js') || f.rel.endsWith('.mjs') ? '.mjs' : null;
+  if (ext) {
+    const t = path.join(tmp, 'check' + ext);
+    fs.writeFileSync(t, f.code);
+    try { execFileSync(process.execPath, ['--check', t], { stdio: 'pipe' }); }
+    catch (e) { fail('Синтаксическая ошибка в ' + f.rel + ':\n' + String(e.stderr || e.message).split('\n').slice(0, 6).join('\n') + '\nПопросите ИИ исправить и пришлите файл полностью.'); }
+  }
+  if (/^src\/modules\/[^_][\w-]*\.js$/.test(f.rel)) {
+    if (/^[ \t]*import\s[^\n]*['"]https?:/m.test(f.code)) fail(f.rel + ': внешние import не допускаются.');
+    if (!/export\s+default/.test(f.code) || !/\bid:\s*['"][\w-]+['"]/.test(f.code) || !/\bmount\s*\(/.test(f.code)) fail(f.rel + ': не похоже на модуль (нужны export default, id, mount).');
+  }
+  if (/\/\/\s*\.\.\.\s*(остальн|rest|existing|без изменений|unchanged)/i.test(f.code)) fail(f.rel + ': ИИ сократил код («остальное без изменений»). Попросите прислать файл ПОЛНОСТЬЮ.');
+}
+fs.rmSync(tmp, { recursive: true, force: true });
+
+// — запись
+const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+for (const f of plan) {
+  const exists = fs.existsSync(f.abs);
+  console.log((dry ? '[пробный запуск] ' : '') + (exists ? '↻ заменяю ' : '＋ создаю  ') + f.rel);
+  if (dry) continue;
+  if (exists) {
+    const b = path.join(root, '.ghost-backup', stamp, f.rel);
+    fs.mkdirSync(path.dirname(b), { recursive: true });
+    fs.copyFileSync(f.abs, b);
+  }
+  fs.mkdirSync(path.dirname(f.abs), { recursive: true });
+  fs.writeFileSync(f.abs, f.code);
+}
+console.log('\n✓ Готово: файлов — ' + plan.length + (plan.some((f) => fs.existsSync(path.join(root, '.ghost-backup', stamp))) ? '  (старые версии: .ghost-backup/' + stamp + ')' : ''));
+console.log('  Проверить: RUN.bat  |  Выпустить для всех: ./ghost.sh release');
+
+===== scripts/ai-pack.mjs =====
+// Делает текстовые файлы для ИИ — их можно вставить в ЛЮБОЙ чат (файлы/архивы/APK ИИ принимать не обязан).
+//   AI-PROMPT.txt     — короткая инструкция: как писать плагины (хватает для 95% задач)
+//   AI-PACK-FULL.txt  — инструкция + исходный код всего проекта (для крупных переделок)
+//   AI-PACK-PART-N.txt — то же самое, нарезанное на куски по ~45 000 знаков для ИИ с маленьким лимитом
+import fs from 'node:fs';
+import path from 'node:path';
+import { buildPluginPrompt } from '../src/core/aiprompt.js';
+
+const root = process.cwd();
+const outDir = path.join(root, 'ai');
+fs.mkdirSync(outDir, { recursive: true });
+
+fs.writeFileSync(path.join(outDir, 'AI-PROMPT.txt'), buildPluginPrompt({ task: '' }) + '\n');
+
+const SKIP_DIR = new Set(['node_modules', 'dist', 'release', 'android', '.git', '.ghost-backup', 'ai', 'build']);
+function walk(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    if (SKIP_DIR.has(e.name)) return [];
+    const p = path.join(dir, e.name);
+    return e.isDirectory() ? walk(p) : [p];
+  });
+}
+const files = ['src', 'electron', 'scripts', 'android-plugin'].filter((d) => fs.existsSync(path.join(root, d)))
+  .flatMap((d) => walk(path.join(root, d)))
+  .concat(['package.json', 'vite.config.js', 'ghost.config.json', 'capacitor.config.json'].map((f) => path.join(root, f)).filter(fs.existsSync))
+  .filter((f) => /\.(js|cjs|mjs|css|json|tpl|xml|sh|ps1)$/.test(f))
+  .map((f) => path.relative(root, f).replace(/\\/g, '/'))
+  .sort();
+
+const header = `ПОЛНЫЙ КОНТЕКСТ ПРОЕКТА
+=============================
+Ниже — инструкция и исходный код этого приложения (Windows + Android, сделано Morphin). Прочитай всё и жди задачу.
+
+КАК ОТВЕЧАТЬ НА КРУПНЫЕ ЗАДАЧИ:
+- верни каждый изменённый или новый файл ПОЛНОСТЬЮ отдельным блоком кода;
+- ПЕРВОЙ строкой каждого блока пиши комментарий  // FILE: путь/к/файлу  (например  // FILE: src/modules/weather.js);
+- никаких «остальное без изменений» — файлы целиком;
+- новые функции интерфейса — отдельные файлы в src/modules/ (подхватываются сами), функции для Windows — в electron/modules/*.cjs;
+- package.json, .github и скрипты сборки не трогай без крайней необходимости (скажи об этом отдельной строкой вне блоков).
+Ответ потом применяется командой  ./ghost.sh add  (она раскладывает блоки по путям).
+
+${buildPluginPrompt({ task: '(задача будет ниже)', compact: true })}
+
+ИСХОДНЫЙ КОД ПРОЕКТА:
+`;
+
+const parts = files.map((f) => '\n===== ' + f + ' =====\n' + fs.readFileSync(path.join(root, f), 'utf8'));
+fs.writeFileSync(path.join(outDir, 'AI-PACK-FULL.txt'), header + parts.join('') + '\n===== КОНЕЦ КОНТЕКСТА. Жди задачу. =====\n');
+
+// нарезка на куски
+for (const old of fs.readdirSync(outDir)) if (/^AI-PACK-PART-\d+\.txt$/.test(old)) fs.unlinkSync(path.join(outDir, old));
+const LIMIT = 45000;
+const chunks = [];
+let cur = '';
+for (const piece of [header, ...parts]) {
+  if (cur.length + piece.length > LIMIT && cur) { chunks.push(cur); cur = ''; }
+  if (piece.length > LIMIT) { for (let i = 0; i < piece.length; i += LIMIT) chunks.push(piece.slice(i, i + LIMIT)); } else cur += piece;
+}
+if (cur) chunks.push(cur);
+chunks.forEach((c, i) => fs.writeFileSync(path.join(outDir, 'AI-PACK-PART-' + (i + 1) + '.txt'),
+  'ЧАСТЬ ' + (i + 1) + ' ИЗ ' + chunks.length + '. ' + (i + 1 < chunks.length ? 'Это не весь контекст: просто отвечай «принято», жди следующую часть.' : 'Это последняя часть: ответь «принято» и жди задачу.') + '\n\n' + c));
+
+const kb = (f) => Math.round(fs.statSync(path.join(outDir, f)).size / 1024) + ' КБ';
+console.log('✓ Готово, папка ai/:');
+console.log('  AI-PROMPT.txt        ' + kb('AI-PROMPT.txt') + '   ← для обычных задач (вставить + описать задачу)');
+console.log('  AI-PACK-FULL.txt     ' + kb('AI-PACK-FULL.txt') + '  ← весь код целиком (для ИИ с большим окном)');
+console.log('  AI-PACK-PART-1…' + chunks.length + '.txt   ← то же, кусками (для ИИ с маленьким лимитом)');
+
+===== scripts/check.mjs =====
+// Быстрая проверка проекта перед выпуском: синтаксис всех файлов + правильная форма модулей.
+// Запуск: npm run check
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const exts = new Set(['.js', '.cjs', '.mjs']);
+const dirs = ['src', 'electron', 'scripts'];
+let bad = 0;
+
+function walk(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+}
+
+const files = [...dirs.filter(fs.existsSync).flatMap(walk), 'vite.config.js', 'electron-builder.config.cjs'].filter((f) => exts.has(path.extname(f)));
+
+for (const f of files) {
+  try {
+    execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
+  } catch (e) {
+    bad++;
+    console.error('✗ Синтаксическая ошибка в ' + f + '\n' + String(e.stderr || e.message).split('\n').slice(0, 6).join('\n'));
+  }
+}
+
+// Каждый файл в src/modules (кроме «_...») должен экспортировать модуль с id и mount.
+const modDir = 'src/modules';
+const ids = new Map();
+for (const f of fs.readdirSync(modDir).filter((n) => n.endsWith('.js') && !n.startsWith('_'))) {
+  const text = fs.readFileSync(path.join(modDir, f), 'utf8');
+  if (!/export\s+default/.test(text)) { bad++; console.error('✗ ' + f + ': нет export default'); continue; }
+  const id = (/\bid:\s*['"]([\w-]+)['"]/.exec(text) || [])[1];
+  if (!id) { bad++; console.error('✗ ' + f + ': не найден id модуля'); continue; }
+  if (!/\bmount\s*\(/.test(text)) { bad++; console.error('✗ ' + f + ': нет метода mount'); }
+  if (ids.has(id)) { bad++; console.error('✗ id «' + id + '» повторяется в ' + f + ' и ' + ids.get(id)); }
+  ids.set(id, f);
+}
+
+if (bad) { console.error('\nНайдено проблем: ' + bad); process.exit(1); }
+console.log('✓ Проверено файлов: ' + files.length + ', модулей: ' + ids.size + ' — всё в порядке');
+
+===== scripts/lib.mjs =====
+import fs from 'node:fs';
+
+export const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
+
+/** 0.2.5 → 205, 1.4.0 → 10400. Растёт вместе с версией, Android требует увеличивать versionCode. */
+export function versionCode(version) {
+  const [a = 0, b = 0, c = 0] = String(version).split('.').map((x) => parseInt(x, 10) || 0);
+  return Math.max(1, a * 10000 + b * 100 + c);
+}
+
+===== scripts/make-keystore.mjs =====
+// Создаёт СВОЙ ключ подписи Android (один раз) и кладёт его в ANDROID-KEY-SECRETS.txt.
+// Каждое обновление APK должно быть подписано этим же ключом. Копия ключа сохраняется в C:\Morphin\keys (или ~/.morphin/keys).
+import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { readJson } from './lib.mjs';
+
+const OUT = 'ANDROID-KEY-SECRETS.txt';
+const cfg = readJson('ghost.config.json');
+const keyHome = process.platform === 'win32' && fs.existsSync('C:\\') ? 'C:\\Morphin\\keys' : path.join(os.homedir(), '.morphin', 'keys');
+const backup = path.join(keyHome, (cfg.slug || 'app') + '-' + (cfg.appId || 'id') + '.txt');
+
+if (fs.existsSync(OUT)) { console.log('✓ Ключ подписи уже есть'); process.exit(0); }
+if (fs.existsSync(backup)) {
+  fs.copyFileSync(backup, OUT);
+  console.log('✓ Ключ подписи восстановлен из ' + backup);
+  process.exit(0);
+}
+
+function findOpenssl() {
+  const cands = ['openssl'];
+  if (process.platform === 'win32') {
+    for (const base of [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')]) {
+      if (!base) continue;
+      cands.push(path.join(base, 'Git', 'usr', 'bin', 'openssl.exe'), path.join(base, 'Git', 'mingw64', 'bin', 'openssl.exe'));
+    }
+  }
+  for (const c of cands) {
+    const r = spawnSync(c, ['version'], { encoding: 'utf8' });
+    if (r.status === 0) return c;
+  }
+  return null;
+}
+
+const ssl = findOpenssl();
+if (!ssl) { console.error('✗ Не нашёл openssl (он идёт вместе с Git for Windows). Установите Git и повторите.'); process.exit(1); }
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ks-'));
+const key = path.join(tmp, 'key.pem'), crt = path.join(tmp, 'crt.pem'), p12 = path.join(tmp, 'app.keystore');
+const pass = crypto.randomBytes(12).toString('hex'); // 24 знака, только 0-9a-f — безопасно для любых оболочек
+const run = (args) => spawnSync(ssl, args, { encoding: 'utf8', env: { ...process.env, MSYS_NO_PATHCONV: '1' } });
+
+let r = run(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', crt, '-days', '10000', '-subj', '/CN=Morphin/O=Morphin']);
+if (r.status !== 0) { console.error('✗ openssl (req): ' + r.stderr); process.exit(1); }
+
+const base = ['pkcs12', '-export', '-inkey', key, '-in', crt, '-name', 'ghost', '-out', p12, '-passout', 'pass:' + pass];
+// Старые алгоритмы шифрования понимает любая версия Java; если openssl их не знает — пробуем без них.
+r = run([...base, '-keypbe', 'PBE-SHA1-3DES', '-certpbe', 'PBE-SHA1-3DES', '-macalg', 'sha1']);
+if (r.status !== 0) r = run(base);
+if (r.status !== 0 || !fs.existsSync(p12)) { console.error('✗ openssl (pkcs12): ' + r.stderr); process.exit(1); }
+
+const b64 = fs.readFileSync(p12).toString('base64').replace(/\s+/g, '');
+fs.rmSync(tmp, { recursive: true, force: true });
+
+const text = `КЛЮЧ ПОДПИСИ ANDROID — ХРАНИТЕ В ТАЙНЕ, НЕ ПУБЛИКУЙТЕ И НЕ КОММИТЬТЕ.
+Все обновления APK должны быть подписаны ЭТИМ ЖЕ ключом, иначе Android откажется ставить их поверх.
+Копия лежит в: ${backup}
+Сохраните файл ещё и в облако/на флешку: потеряете — придётся удалять приложение и ставить заново.
+
+(Секреты в GitHub записываются автоматически скриптом, вручную ничего делать не нужно.)
+
+─────────────────────────────────────────
+Имя:      ANDROID_KEYSTORE_PASSWORD
+Значение: ${pass}
+
+─────────────────────────────────────────
+Имя:      ANDROID_KEYSTORE_BASE64
+Значение: ${b64}
+─────────────────────────────────────────
+
+Алиас ключа внутри хранилища: ghost
+`;
+fs.writeFileSync(OUT, text);
+fs.mkdirSync(keyHome, { recursive: true });
+fs.writeFileSync(backup, text);
+console.log('✓ Создан ключ подписи (копия: ' + backup + ')');
+
+===== scripts/make-version-json.mjs =====
+// Создаёт version.json рядом с APK — его читает приложение на Android, чтобы узнать о новой версии.
+// Запуск: node scripts/make-version-json.mjs out/Ghost-0.2.0.apk
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { readJson, versionCode } from './lib.mjs';
+
+const apk = process.argv[2];
+if (!apk || !fs.existsSync(apk)) {
+  console.error('Укажите путь к APK: node scripts/make-version-json.mjs путь/к/файлу.apk');
+  process.exit(1);
+}
+
+const pkg = readJson('package.json');
+const cfg = readJson('ghost.config.json');
+const repo = process.env.GITHUB_REPOSITORY || cfg.repo;
+const sha256 = crypto.createHash('sha256').update(fs.readFileSync(apk)).digest('hex');
+
+const info = {
+  version: pkg.version,
+  versionCode: versionCode(pkg.version),
+  apk: `https://github.com/${repo}/releases/download/v${pkg.version}/${path.basename(apk)}`,
+  sha256,
+  notes: process.env.NOTES || '',
+  date: new Date().toISOString(),
+};
+
+const out = path.join(path.dirname(apk), 'version.json');
+fs.writeFileSync(out, JSON.stringify(info, null, 2));
+console.log('Записан ' + out);
+console.log(info);
+
+===== scripts/name-app.mjs =====
+// Задаёт название приложения (как оно будет подписано на рабочем столе Android и в Windows).
+//   node scripts/name-app.mjs "Моё приложение"        — первый запуск: имя + идентификатор приложения
+//   node scripts/name-app.mjs --rename "Новое имя"    — только поменять подпись (идентификатор не трогаем,
+//                                                        иначе Android перестанет ставить обновления поверх)
+import fs from 'node:fs';
+import { readJson } from './lib.mjs';
+
+const args = process.argv.slice(2);
+const rename = args.includes('--rename');
+const raw = args.filter((a) => a !== '--rename').join(' ');
+
+const fail = (m) => { console.error('\n✗ ' + m + '\n'); process.exit(1); };
+
+const name = raw.replace(/[\u0000-\u001f<>"&\\/]/g, '').replace(/\s+/g, ' ').trim();
+if (!name) fail('Название не может быть пустым.');
+if (name.length > 30) fail('Название слишком длинное (до 30 знаков).');
+
+const TR = { а:'a',б:'b',в:'v',г:'g',д:'d',е:'e',ё:'e',ж:'zh',з:'z',и:'i',й:'y',к:'k',л:'l',м:'m',н:'n',о:'o',п:'p',р:'r',с:'s',т:'t',у:'u',ф:'f',х:'h',ц:'c',ч:'ch',ш:'sh',щ:'sch',ъ:'',ы:'y',ь:'',э:'e',ю:'yu',я:'ya' };
+const latin = [...name.toLowerCase()].map((ch) => (TR[ch] !== undefined ? TR[ch] : ch)).join('');
+let words = latin.split(/[^a-z0-9]+/).filter(Boolean);
+let slug = words.map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+if (!slug) slug = 'Morphin';
+if (/^\d/.test(slug)) slug = 'App' + slug;
+slug = slug.slice(0, 24);
+
+const cfg = readJson('ghost.config.json');
+const cap = readJson('capacitor.config.json');
+const pkg = readJson('package.json');
+
+const first = !cfg.setupDone && !rename;
+if (first) {
+  cfg.slug = slug;
+  cap.appId = 'com.morphin.' + slug.toLowerCase();
+  cfg.appId = cap.appId;
+  cfg.setupDone = true;
+  // имя репозитория по умолчанию
+  if (/^YOUR_/i.test(cfg.repo || '')) cfg.repoName = slug.toLowerCase();
+} else if (!cfg.appId) {
+  cfg.appId = cap.appId;
+}
+cfg.appName = name;
+cap.appName = name;
+pkg.productName = name;
+if (first) pkg.name = slug.toLowerCase() + '-app';
+
+fs.writeFileSync('ghost.config.json', JSON.stringify(cfg, null, 2) + '\n');
+fs.writeFileSync('capacitor.config.json', JSON.stringify(cap, null, 2) + '\n');
+fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+
+// заголовок страницы
+let html = fs.readFileSync('index.html', 'utf8');
+const esc = name.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+html = html.replace(/<title>[\s\S]*?<\/title>/, '<title>' + esc + '</title>');
+fs.writeFileSync('index.html', html);
+
+console.log('✓ Название: «' + name + '»  (файлы: ' + cfg.slug + '-…, id: ' + cap.appId + ')');
+
+===== scripts/patch-android.mjs =====
+// Дорабатывает свежесозданный Android-проект (npx cap add android):
+//  • плагин установки APK, фоновая проверка обновлений (уведомление «Доступно обновление»), свой FileProvider,
+//  • разрешения (установка APK, уведомления), зависимость WorkManager,
+//  • значок приложения, цвета системных панелей, название на рабочем столе,
+//  • versionName/versionCode из package.json.
+// Безопасно запускать повторно.
+import fs from 'node:fs';
+import path from 'node:path';
+import { readJson, versionCode } from './lib.mjs';
+
+const root = process.cwd();
+const cap = readJson(path.join(root, 'capacitor.config.json'));
+const pkg = readJson(path.join(root, 'package.json'));
+const cfg = readJson(path.join(root, 'ghost.config.json'));
+const appId = cap.appId;
+const androidDir = path.join(root, 'android');
+const res = path.join(androidDir, 'app/src/main/res');
+
+if (!fs.existsSync(androidDir)) {
+  console.error('Нет папки android. Сначала выполните: npx cap add android');
+  process.exit(1);
+}
+
+const xmlEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, "\\'").replace(/"/g, '\\"');
+
+// адрес файла version.json (тот же, что использует само приложение)
+function updateUrl() {
+  const base = cfg.updateBaseUrl
+    ? String(cfg.updateBaseUrl).replace(/\/+$/, '')
+    : (cfg.repo && !/^YOUR_/i.test(cfg.repo) ? `https://github.com/${cfg.repo}/releases/latest/download` : '');
+  return base ? base + '/version.json' : '';
+}
+
+// 1. Java-файлы
+const javaDir = path.join(androidDir, 'app/src/main/java', ...appId.split('.'));
+fs.mkdirSync(javaDir, { recursive: true });
+for (const name of ['ApkInstallerPlugin', 'GhostFileProvider', 'UpdateWorker', 'MainActivity']) {
+  const tpl = fs.readFileSync(path.join(root, 'android-plugin', name + '.java.tpl'), 'utf8').replaceAll('__APP_PACKAGE__', appId);
+  fs.writeFileSync(path.join(javaDir, name + '.java'), tpl);
+}
+
+// 2. ресурсы: xml FileProvider, значок уведомления, значок приложения, адрес обновлений, цвета
+fs.mkdirSync(path.join(res, 'xml'), { recursive: true });
+fs.copyFileSync(path.join(root, 'android-plugin/ghost_update_paths.xml'), path.join(res, 'xml/ghost_update_paths.xml'));
+fs.mkdirSync(path.join(res, 'drawable'), { recursive: true });
+fs.copyFileSync(path.join(root, 'android-plugin/ic_stat_update.xml'), path.join(res, 'drawable/ic_stat_update.xml'));
+
+const iconSrc = path.join(root, 'android-plugin/res');
+if (fs.existsSync(iconSrc)) {
+  const copyDir = (from, to) => {
+    fs.mkdirSync(to, { recursive: true });
+    for (const e of fs.readdirSync(from, { withFileTypes: true })) {
+      const a = path.join(from, e.name), b = path.join(to, e.name);
+      if (e.isDirectory()) copyDir(a, b); else fs.copyFileSync(a, b);
+    }
+  };
+  copyDir(iconSrc, res);
+}
+
+fs.mkdirSync(path.join(res, 'values'), { recursive: true });
+fs.writeFileSync(path.join(res, 'values/ghost_config.xml'),
+  `<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="ghost_update_url" translatable="false">${updateUrl()}</string>\n</resources>\n`);
+
+// название приложения на рабочем столе (cap add уже подставил appName из capacitor.config.json — дублируем на всякий случай)
+const stringsPath = path.join(res, 'values/strings.xml');
+if (fs.existsSync(stringsPath)) {
+  let s = fs.readFileSync(stringsPath, 'utf8');
+  const name = xmlEsc(cap.appName || cfg.appName || 'Ghost');
+  s = s.replace(/(<string name="app_name">)[\s\S]*?(<\/string>)/, (_m, a, b) => a + name + b)
+       .replace(/(<string name="title_activity_main">)[\s\S]*?(<\/string>)/, (_m, a, b) => a + name + b);
+  fs.writeFileSync(stringsPath, s);
+}
+
+// тёмные системные панели в стиле приложения
+const stylesPath = path.join(res, 'values/styles.xml');
+if (fs.existsSync(stylesPath)) {
+  let s = fs.readFileSync(stylesPath, 'utf8');
+  if (!s.includes('ghost_bars')) {
+    s = s.replace(/(<style name="AppTheme\.NoActionBar"[^>]*>)/, (m) =>
+      m + '\n        <!-- ghost_bars -->\n        <item name="android:statusBarColor">#06090D</item>\n        <item name="android:navigationBarColor">#06090D</item>\n        <item name="android:windowBackground">#06090D</item>');
+    fs.writeFileSync(stylesPath, s);
+  }
+}
+
+// 3. AndroidManifest.xml
+const mfPath = path.join(androidDir, 'app/src/main/AndroidManifest.xml');
+let mf = fs.readFileSync(mfPath, 'utf8');
+const perms = ['android.permission.REQUEST_INSTALL_PACKAGES', 'android.permission.POST_NOTIFICATIONS'];
+for (const p of perms) {
+  if (!mf.includes(p)) mf = mf.replace('<application', `<uses-permission android:name="${p}" />\n\n    <application`);
+}
+if (!mf.includes('GhostFileProvider')) {
+  const provider = `
+        <provider
+            android:name="${appId}.GhostFileProvider"
+            android:authorities="\${applicationId}.ghostupdate"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/ghost_update_paths" />
+        </provider>
+    </application>`;
+  mf = mf.replace('</application>', provider);
+}
+fs.writeFileSync(mfPath, mf);
+
+// 4. версия приложения и зависимость WorkManager
+const gradlePath = path.join(androidDir, 'app/build.gradle');
+let gradle = fs.readFileSync(gradlePath, 'utf8');
+gradle = gradle
+  .replace(/versionCode\s+\d+/, 'versionCode ' + versionCode(pkg.version))
+  .replace(/versionName\s+"[^"]*"/, 'versionName "' + pkg.version + '"');
+if (!gradle.includes('androidx.work:work-runtime')) {
+  gradle = gradle.replace(/dependencies\s*\{/, 'dependencies {\n    implementation "androidx.work:work-runtime:2.9.1"');
+}
+fs.writeFileSync(gradlePath, gradle);
+
+console.log('Android-проект подготовлен: «' + (cap.appName || '') + '», версия ' + pkg.version + ' (versionCode ' + versionCode(pkg.version) + '), обновления: ' + (updateUrl() || 'адрес не задан'));
+
+===== scripts/release.mjs =====
+// «Выпустить обновление с компа»: поднимает версию, коммитит, ставит тег и пушит.
+// GitHub Actions сам соберёт Windows-установщик и APK и опубликует релиз — приложения увидят обновление.
+//
+//   npm run release                       → 0.1.0 → 0.1.1
+//   npm run release -- minor              → 0.1.1 → 0.2.0
+//   npm run release -- major              → 0.2.0 → 1.0.0
+//   npm run release -- 0.5.0 "Что нового" → точная версия и описание
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import { readJson } from './lib.mjs';
+
+const git = (...args) => execFileSync('git', args, { stdio: 'inherit' });
+const gitOut = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+const fail = (msg) => { console.error('\n✗ ' + msg + '\n'); process.exit(1); };
+
+const pkg = readJson('package.json');
+const cfg = readJson('ghost.config.json');
+
+// — проверки до любых изменений
+try { gitOut('rev-parse', '--is-inside-work-tree'); }
+catch { fail('Папка не является git-репозиторием. Запустите ghost.bat → «ПОЛНЫЙ АВТОМАТ» — он всё настроит сам.'); }
+try { gitOut('remote', 'get-url', 'origin'); }
+catch { fail('Не подключён GitHub. Запустите ghost.bat → «ПОЛНЫЙ АВТОМАТ» — он всё настроит сам.'); }
+if (/^YOUR_/i.test(cfg.repo || '')) fail('В ghost.config.json впишите свой репозиторий в поле "repo" (например "kkkuss/ghost"), закоммитьте и повторите.');
+
+try { execFileSync(process.execPath, ['scripts/check.mjs'], { stdio: 'inherit' }); }
+catch { fail('Проверка кода не прошла — исправьте ошибки выше, выпуск отменён.'); }
+
+// — новая версия
+const arg = process.argv[2] || 'patch';
+const [a, b, c] = pkg.version.split('.').map(Number);
+let next;
+if (/^\d+\.\d+\.\d+$/.test(arg)) next = arg;
+else if (arg === 'major') next = `${a + 1}.0.0`;
+else if (arg === 'minor') next = b >= 99 ? `${a + 1}.0.0` : `${a}.${b + 1}.0`;
+else if (arg === 'patch') next = c >= 99 ? (b >= 99 ? `${a + 1}.0.0` : `${a}.${b + 1}.0`) : `${a}.${b}.${c + 1}`;
+else fail('Не понял аргумент «' + arg + '». Используйте patch, minor, major или номер вида 1.2.3');
+
+const note = process.argv.slice(3).join(' ').trim();
+const tag = 'v' + next;
+try { if (gitOut('tag', '-l', tag)) fail('Тег ' + tag + ' уже существует.'); } catch { /* нет тегов */ }
+
+pkg.version = next;
+fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+
+console.log(`\nВыпускаю ${tag}…\n`);
+git('add', '-A');
+git('commit', '--allow-empty', '-m', note ? `${tag}: ${note}` : `Release ${tag}`);
+git('tag', tag);
+git('push', 'origin', 'HEAD');
+git('push', 'origin', tag);
+
+console.log(`\n✓ Версия ${next} отправлена. Сборка идёт на GitHub: https://github.com/${cfg.repo}/actions`);
+console.log('  Через 10–15 минут телефон и ПК покажут «Доступно обновление ' + next + '» — даже если этот компьютер будет выключен.');
+
+===== scripts/selftest.mjs =====
+// Самопроверка чистых функций и скриптов. Запуск: npm run selftest
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { extractCode, adaptCode, lintCode } from '../src/core/plugins.js';
+import { buildPluginPrompt, EXAMPLE } from '../src/core/aiprompt.js';
+import { sanitizeSvg } from '../src/core/profile.js';
+
+let n = 0;
+const t = (name, fn) => { try { fn(); n++; console.log('  ✓', name); } catch (e) { console.error('  ✗', name, '\n   ', e.message); process.exitCode = 1; } };
+
+const GOOD = "export default {\n  id: 'demo', title: 'Демо', mount(root, ctx) { root.append('hi'); },\n};";
+
+t('extractCode: блок из ответа с пояснениями', () => assert.equal(extractCode('Вот код:\n```js\n' + GOOD + '\n```\nГотово!'), GOOD));
+t('extractCode: выбирает блок с export default', () => assert.equal(extractCode('```bash\nnpm i\n```\n```js\n' + GOOD + '\n```'), GOOD));
+t('extractCode: оборванный ответ без закрывающих ```', () => assert.equal(extractCode('Держи\n```js\n' + GOOD), GOOD));
+t('extractCode: чистый код без блоков', () => assert.equal(extractCode(GOOD), GOOD));
+t('extractCode: код из примера в промте валиден', () => { const c = extractCode(EXAMPLE); lintCode(c); assert.match(c, /id: 'notes'/); });
+
+t('adaptCode: import из ядра → globalThis.__ghost', () => {
+  const a = adaptCode("import { h, panel as p } from '../core/ui.js';\nimport { invoke } from '../core/bridge.js';\nx");
+  assert.match(a, /const \{ h, panel: p \} = globalThis\.__ghost\.ui;/);
+  assert.match(a, /const \{ invoke \} = globalThis\.__ghost\.bridge;/);
+});
+t('lintCode: require запрещён', () => assert.throws(() => lintCode("const fs = require('fs');\nexport default { id: 'aa', mount() {} };"), /require/));
+t('lintCode: чужой import запрещён, из ядра — можно', () => {
+  assert.throws(() => lintCode("import x from 'lodash';\nexport default { id: 'aa', mount() {} };  // ........."), /import/);
+  lintCode("import { h } from '../core/ui.js';\nexport default { id: 'aa', mount() {} };  // ok ok ok ok");
+});
+t('lintCode: нет export default', () => assert.throws(() => lintCode('function a() { return 1 }  // ............................'), /export default/));
+t('lintCode: «остальное без изменений»', () => assert.throws(() => lintCode(GOOD + '\n// ... остальное без изменений'), /сократил/));
+t('lintCode: слишком короткий', () => assert.throws(() => lintCode('x'), /короткий/));
+
+t('sanitizeSvg: вырезает script, on*, внешние href', () => {
+  const s = sanitizeSvg('текст <svg viewBox="0 0 9 9"><script>alert(1)</script><rect onclick="x()" width="1"/><image href="https://evil/x.png"/><use href="#a"/></svg> конец');
+  assert.ok(!/script|onclick|evil/.test(s)); assert.match(s, /href="#a"/); assert.match(s, /xmlns/);
+});
+t('sanitizeSvg: нет svg → ошибка', () => assert.throws(() => sanitizeSvg('просто текст'), /SVG/));
+
+t('buildPluginPrompt: содержит задачу, API и правила ответа', () => {
+  const p = buildPluginPrompt({ task: 'курс валют', platform: 'win', existingIds: ['home'] });
+  assert.match(p, /курс валют/); assert.match(p, /ctx\.sh/); assert.match(p, /ФОРМАТ ОТВЕТА/); assert.match(p, /только Windows/); assert.match(p, /home/);
+  assert.ok(buildPluginPrompt({ task: 'x', compact: true }).length < p.length);
+  assert.match(buildPluginPrompt({ task: 'x', currentCode: GOOD }), /ТЕКУЩИЙ КОД/);
+});
+
+// — add-module.mjs в песочнице
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-selftest-'));
+const script = path.resolve('scripts/add-module.mjs');
+const add = (input, extra = []) => {
+  fs.writeFileSync(path.join(sandbox, 'in.txt'), input);
+  return spawnSync(process.execPath, [script, 'in.txt', ...extra], { cwd: sandbox, encoding: 'utf8' });
+};
+t('add-module: один модуль → src/modules/<id>.js', () => {
+  const r = add('Вот:\n```js\n' + GOOD + '\n```');
+  assert.equal(r.status, 0, r.stderr); assert.ok(fs.existsSync(path.join(sandbox, 'src/modules/demo.js')));
+});
+t('add-module: повтор делает резервную копию', () => {
+  const r = add('```js\n' + GOOD + '\n```');
+  assert.equal(r.status, 0, r.stderr); assert.ok(fs.existsSync(path.join(sandbox, '.ghost-backup')));
+});
+t('add-module: несколько файлов по // FILE:', () => {
+  const r = add('```js\n// FILE: src/modules/a1.js\nexport default { id: \'a1\', mount() {} };\n```\n```js\n// FILE: electron/modules/b1.cjs\nmodule.exports = { handlers: { \'b1:x\': async () => 1 } };\n```');
+  assert.equal(r.status, 0, r.stderr); assert.ok(fs.existsSync(path.join(sandbox, 'src/modules/a1.js')) && fs.existsSync(path.join(sandbox, 'electron/modules/b1.cjs')));
+});
+t('add-module: native-модуль без FILE → electron/modules/<канал>.cjs', () => {
+  const r = add('```js\nmodule.exports = { handlers: { \'zz:ping\': async () => 1 } };\n```');
+  assert.equal(r.status, 0, r.stderr); assert.ok(fs.existsSync(path.join(sandbox, 'electron/modules/zz.cjs')));
+});
+t('add-module: синтаксическая ошибка — ничего не пишет', () => {
+  const r = add('```js\nexport default { id: \'bad1\', mount( { }\n```');
+  assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(sandbox, 'src/modules/bad1.js')));
+});
+t('add-module: запрещённые пути (package.json, ..) не пишутся', () => {
+  const r = add('```js\n// FILE: ../evil.js\nexport default { id: \'ev\', mount() {} };\n```\n```js\n// FILE: package.json\n{}\n```');
+  assert.notEqual(r.status, 0); assert.ok(!fs.existsSync(path.join(sandbox, '..', 'evil.js')) && !fs.existsSync(path.join(sandbox, 'package.json')));
+});
+t('add-module: «остальное без изменений» отклоняется', () => {
+  const r = add('```js\nexport default { id: \'cut1\', mount() {} };\n// ... остальное без изменений\n```');
+  assert.notEqual(r.status, 0);
+});
+fs.rmSync(sandbox, { recursive: true, force: true });
+
+console.log(process.exitCode ? '\nЕсть ошибки' : '\n✓ Самопроверка пройдена: ' + n + ' проверок');
+
+===== scripts/setup-windows.ps1 =====
+﻿param([switch]$BuildOnly, [switch]$InstallOnly)
+
+# Morphin · Ghost — установка всего необходимого на Windows 10 одной кнопкой (сделано Morphin).
+# Запускается через INSTALL.bat (двойной клик). Сам просит права администратора.
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$root = Split-Path -Parent $PSScriptRoot
+
+function Say($text, $color = 'Cyan') { Write-Host "[Morphin] $text" -ForegroundColor $color }
+function Has($cmd) { return [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+function Refresh-Path {
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+}
+function Node-Ok {
+    if (-not (Has node)) { return $false }
+    $v = (node -v) -replace '^v', ''
+    return ([int]($v -split '\.')[0]) -ge 20
+}
+function Download($url, $file) {
+    Say "Скачиваю $url"
+    Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
+}
+
+# — права администратора (нужны для установки Node.js/Git и для сборки установщика)
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Say 'Нужны права администратора — сейчас появится запрос Windows, нажмите «Да».' 'Yellow'
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($BuildOnly) { $argList += ' -BuildOnly' }
+    if ($InstallOnly) { $argList += ' -InstallOnly' }
+    Start-Process powershell -Verb RunAs -ArgumentList $argList
+    exit
+}
+
+function Npm-Run($script) {
+    & npm run $script
+    if ($LASTEXITCODE -ne 0) {
+        Say 'Не вышло. Пробую через зеркало загрузок (если GitHub медленный или недоступен)…' 'Yellow'
+        $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+        $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+        & npm run $script
+        if ($LASTEXITCODE -ne 0) { throw "Команда npm run $script завершилась с ошибкой" }
+    }
+}
+
+try {
+    Set-Location $root
+
+    if (-not $BuildOnly) {
+        # — Node.js
+        if (-not (Node-Ok)) {
+            Say 'Устанавливаю Node.js (LTS)…'
+            $done = $false
+            if (Has winget) {
+                try {
+                    winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
+                    $done = ($LASTEXITCODE -eq 0)
+                } catch { $done = $false }
+            }
+            if (-not $done) {
+                $idx = Invoke-RestMethod 'https://nodejs.org/dist/index.json'
+                $ver = ($idx | Where-Object { $_.lts } | Select-Object -First 1).version
+                $msi = Join-Path $env:TEMP "node-$ver-x64.msi"
+                Download "https://nodejs.org/dist/$ver/node-$ver-x64.msi" $msi
+                Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
+            }
+            Refresh-Path
+            if (-not (Node-Ok)) { throw 'Node.js не установился. Поставьте его вручную с nodejs.org (кнопка LTS) и запустите INSTALL.bat снова.' }
+        }
+        Say ('Node.js: ' + (node -v)) 'Green'
+
+        # — Git (нужен для команды выпуска обновлений)
+        if (-not (Has git)) {
+            Say 'Устанавливаю Git…'
+            $done = $false
+            if (Has winget) {
+                try {
+                    winget install -e --id Git.Git --silent --accept-package-agreements --accept-source-agreements
+                    $done = ($LASTEXITCODE -eq 0)
+                } catch { $done = $false }
+            }
+            if (-not $done) {
+                $rel = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers @{ 'User-Agent' = 'ghost-setup' }
+                $asset = $rel.assets | Where-Object { $_.name -match '^Git-[\d\.]+(\.windows\.\d+)?-64-bit\.exe$' } | Select-Object -First 1
+                if ($asset) {
+                    $exe = Join-Path $env:TEMP $asset.name
+                    Download $asset.browser_download_url $exe
+                    Start-Process $exe -ArgumentList '/VERYSILENT /NORESTART' -Wait
+                }
+            }
+            Refresh-Path
+        }
+        if (Has git) { Say ('Git: ' + (git --version)) 'Green' } else { Say 'Git не поставился — он нужен только для выпуска обновлений, установите позже с git-scm.com' 'Yellow' }
+
+
+        # — GitHub CLI (вход в GitHub и выпуск обновлений)
+        if (-not (Has gh)) {
+            Say 'Устанавливаю GitHub CLI…'
+            $done = $false
+            if (Has winget) {
+                try {
+                    winget install -e --id GitHub.cli --silent --accept-package-agreements --accept-source-agreements
+                    $done = ($LASTEXITCODE -eq 0)
+                } catch { $done = $false }
+            }
+            if (-not $done) {
+                try {
+                    $rel = Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest' -Headers @{ 'User-Agent' = 'morphin-setup' }
+                    $asset = $rel.assets | Where-Object { $_.name -match 'windows_amd64\.msi$' } | Select-Object -First 1
+                    if ($asset) {
+                        $msi = Join-Path $env:TEMP $asset.name
+                        Download $asset.browser_download_url $msi
+                        Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
+                    }
+                } catch { Say ('GitHub CLI не поставился автоматически: ' + $_.Exception.Message) 'Yellow' }
+            }
+            Refresh-Path
+        }
+        if (Has gh) { Say ('GitHub CLI: ' + ((gh --version) | Select-Object -First 1)) 'Green' } else { Say 'GitHub CLI не поставился — поставьте с cli.github.com' 'Yellow' }
+
+        # — зависимости проекта
+        Say 'Устанавливаю зависимости проекта (несколько минут)…'
+        & npm install --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) {
+            Say 'Не вышло. Пробую через зеркало…' 'Yellow'
+            $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+            & npm install --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw 'npm install завершился с ошибкой' }
+        }
+    }
+
+    # — сборка установщика
+    $answer = 'n'
+    if (-not $InstallOnly) { $answer = Read-Host 'Собрать установщик для Windows (.exe) сейчас? [Y/n]' }
+    if ($answer -ne 'n' -and $answer -ne 'N') {
+        Say 'Собираю… (первый раз — до 10 минут, скачиваются компоненты)'
+        Npm-Run 'win:build'
+        $exe = Get-ChildItem (Join-Path $root 'release') -Filter '*-Setup-*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($exe) {
+            Say ('Готово: ' + $exe.FullName) 'Green'
+            $run = Read-Host 'Установить на этот компьютер сейчас? [Y/n]'
+            if ($run -ne 'n' -and $run -ne 'N') { Start-Process $exe.FullName }
+            else { Start-Process explorer.exe (Join-Path $root 'release') }
+        }
+    }
+
+    Write-Host ''
+    Say 'Всё готово. Дальше:' 'Green'
+    Write-Host '  • ghost.bat — меню: полный автомат, новая функция от ИИ, запуск'
+    Write-Host '  • UPDATE.bat — новая функция от ИИ одним действием'
+    Write-Host '  • RUN.bat — запустить приложение из исходников'
+    Write-Host '  • BUILD-EXE.bat — собрать установщик .exe'
+    if ($InstallOnly) { exit 0 }
+}
+catch {
+    Write-Host ''
+    Say ('ОШИБКА: ' + $_.Exception.Message) 'Red'
+    $failed = $true
+}
+
+Write-Host ''
+if ($failed -or -not $InstallOnly) { Read-Host 'Нажмите Enter, чтобы закрыть окно' }

@@ -1,0 +1,105 @@
+name: Build & Release
+
+# Запускается, когда вы выпускаете версию (ghost.sh release / UPDATE.bat пушит тег v*).
+# Облако собирает APK и Windows-установщик, публикует релиз на GitHub — телефон и ПК видят обновление,
+# даже когда ваш компьютер выключен.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - run: npx vite build
+      - run: npx cap add android
+      - run: node scripts/patch-android.mjs
+      - run: npx cap sync android
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KS_B64" ] || [ -z "$KS_PASS" ]; then
+            echo "::error::Не заданы секреты ANDROID_KEYSTORE_BASE64 и ANDROID_KEYSTORE_PASSWORD. Запустите ghost.sh github — он запишет их сам."
+            exit 1
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          SLUG=$(node -p "require('./ghost.config.json').slug || 'Ghost'")
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/app.keystore"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          mkdir -p out
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/app.keystore" --ks-key-alias ghost --ks-pass env:KS_PASS --out "out/$SLUG-$VERSION.apk" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify "out/$SLUG-$VERSION.apk"
+
+      - name: version.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SLUG=$(node -p "require('./ghost.config.json').slug || 'Ghost'")
+          NOTES=$(git log -1 --pretty=%s)
+          NOTES="$NOTES" node scripts/make-version-json.mjs "out/$SLUG-$VERSION.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            out/*.apk
+            out/version.json
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - run: npm run win:build
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            release/*-Setup-*.exe
+            release/*-Setup-*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+
+  # Публикуем, как только готов APK. Если Windows-часть упала — телефон всё равно получит обновление.
+  publish:
+    needs: [android, windows]
+    if: ${{ always() && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: artifacts/*
+          generate_release_notes: true

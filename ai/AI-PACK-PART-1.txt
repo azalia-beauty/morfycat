@@ -1,0 +1,1053 @@
+ЧАСТЬ 1 ИЗ 5. Это не весь контекст: просто отвечай «принято», жди следующую часть.
+
+ПОЛНЫЙ КОНТЕКСТ ПРОЕКТА
+=============================
+Ниже — инструкция и исходный код этого приложения (Windows + Android, сделано Morphin). Прочитай всё и жди задачу.
+
+КАК ОТВЕЧАТЬ НА КРУПНЫЕ ЗАДАЧИ:
+- верни каждый изменённый или новый файл ПОЛНОСТЬЮ отдельным блоком кода;
+- ПЕРВОЙ строкой каждого блока пиши комментарий  // FILE: путь/к/файлу  (например  // FILE: src/modules/weather.js);
+- никаких «остальное без изменений» — файлы целиком;
+- новые функции интерфейса — отдельные файлы в src/modules/ (подхватываются сами), функции для Windows — в electron/modules/*.cjs;
+- package.json, .github и скрипты сборки не трогай без крайней необходимости (скажи об этом отдельной строкой вне блоков).
+Ответ потом применяется командой  ./ghost.sh add  (она раскладывает блоки по путям).
+
+Ты — разработчик этого приложения. Напиши новый плагин по моему описанию.
+
+ЗАДАЧА:
+(задача будет ниже)
+
+ПЛАТФОРМА: и Windows, и Android (ctx.sh недоступен на Android: либо не используй его, либо проверяй ctx.platform === 'win')
+
+ЭТО ПРИЛОЖЕНИЕ — КАК НАПИСАТЬ ФУНКЦИЮ (ПЛАГИН)
+==============================================
+Это приложение для Windows и Android (сделано Morphin) с тёмным «хакерским» HUD-интерфейсом. Каждая функция — отдельный плагин:
+ОДИН файл чистого JavaScript (ES2020), который приложение подгружает прямо во время работы, без пересборки.
+
+ФОРМАТ ФАЙЛА (строго):
+- ровно один «export default { ... }», никаких других export;
+- БЕЗ import и require — всё нужное приходит через аргумент ctx;
+- без TypeScript, JSX, HTML-файлов и сборщиков; без внешних библиотек (только браузерные API: fetch, canvas, crypto, Intl и т.п.);
+
+export default {
+  id: 'my-tool',            // латиница в нижнем регистре, цифры, дефис; 2–32 символа; уникальный
+  title: 'Название',        // подпись в меню
+  icon: '★',                // один символ
+  order: 100,               // позиция в меню (меньше — выше)
+  desc: 'Что делает',       // подпись на плитке главной страницы
+  platforms: ['win'],       // необязательно: ['win'] — только Windows, ['android'] — только Android; без поля — везде
+  async mount(root, ctx) {  // root — пустой <div> страницы плагина
+    // ...строим интерфейс и вешаем обработчики...
+    // можно вернуть функцию очистки: return () => clearInterval(timer);
+  },
+};
+
+ctx (второй аргумент mount):
+- ctx.platform — 'win' | 'android' | 'web';  ctx.version — версия приложения;  ctx.go('id') — перейти на страницу другого модуля.
+- ctx.ui — помощники интерфейса:
+    h(tag, attrs, ...children)  создать элемент. Строки-потомки вставляются как ТЕКСТ. attrs: class, style (объект), onclick и другие on*, value, placeholder, type…
+    panel(title, ...children)   рамка с заголовком
+    button(label, onClick, cls) кнопка; cls: 'primary' | 'danger' | 'ghost' | ''
+    field(label, control)       подпись + поле ввода
+    kv([[ключ, значение], ...]) таблица «ключ — значение» (у результата есть метод .add(k, v))
+    toast(text, kind)           всплывашка; kind: 'info' | 'bad'
+    copy(text)                  скопировать в буфер обмена
+    fmtBytes(n), fmtUptime(sec), drawSpark(canvas, массивЧисел, { max, color })
+- ctx.store — постоянное хранилище ЭТОГО плагина: get(key, default), set(key, value), del(key). Значения — любые JSON-данные.
+- ctx.bridge.http(url, { method, headers, body, timeout }) → Promise<{ status, text }> — сетевой запрос без проблем с CORS
+  (https; method по умолчанию 'GET'; body — строка). ctx.bridge.httpJson(url, opts) → Promise<объект>.
+- ctx.sh(cmd, { shell, cwd, timeout }) → Promise<{ code, stdout, stderr }> — выполнить команду в Windows
+  (shell: 'powershell' по умолчанию или 'cmd'). ТОЛЬКО Windows: такой плагин обязан иметь platforms: ['win'].
+- ctx.ai.ask(prompt, { system }) → Promise<строка> — спросить ИИ (работает, только если пользователь подключил ИИ в Студии, иначе бросает ошибку).
+- ctx.profile.get() → { name, avatar, accent }.
+
+СТИЛЬ. Используй готовые CSS-классы: panel, row (flex-ряд; дочерний элемент с классом grow растягивается), grid (адаптивная сетка),
+btn, chips + chip, table (th/td), out (<pre> для вывода текста), bar (полоса прогресса: внутри <i> с style.width), dim (приглушённый текст),
+ok / warn / err / acc (цвета текста), mt (отступ сверху), small. Поля input / select / textarea уже оформлены.
+Свои цвета не задавай — используй var(--acc), var(--fg), var(--dim), var(--ok), var(--warn), var(--bad).
+
+ПРАВИЛА:
+1. Данные от пользователя и из сети вставляй только через h(...) / textContent, никогда через innerHTML.
+2. Все операции, которые могут упасть (сеть, парсинг, ctx.sh), оборачивай в try/catch и показывай ошибку пользователю (toast или текст на странице).
+3. Таймеры и слушатели снимай в функции очистки, которую возвращает mount.
+4. Интерфейс должен нормально выглядеть на телефоне (узкий экран): без фиксированной ширины больше 100%.
+5. Сканирование сети — только собственные устройства и локальные адреса. Не пиши код для атак, взлома чужих аккаунтов и сетей, вредоносов и слежки за людьми.
+6. Пиши понятные комментарии на русском прямо в коде.
+
+ФОРМАТ ОТВЕТА:
+- верни ОДИН блок кода ```js … ``` с полным файлом плагина; пояснения — только комментариями внутри кода;
+- файл должен быть ПОЛНЫМ: не сокращай, не пиши «остальное без изменений»;
+- один export default, без import и require; проверь код на синтаксические ошибки перед ответом.
+
+ИСХОДНЫЙ КОД ПРОЕКТА:
+
+===== android-plugin/ApkInstallerPlugin.java.tpl =====
+package __APP_PACKAGE__;
+
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.net.Uri;
+import android.os.Build;
+import android.provider.Settings;
+import androidx.core.content.FileProvider;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
+
+/**
+ * Скачивает APK по https и открывает системный установщик Android.
+ * Для установки нужно разрешение «Установка из неизвестных источников» для этого приложения —
+ * если его нет, открываем нужный экран настроек, и пользователь включает его один раз.
+ */
+@CapacitorPlugin(name = "ApkInstaller")
+public class ApkInstallerPlugin extends Plugin {
+
+    private boolean canInstallNow() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true;
+        return getContext().getPackageManager().canRequestPackageInstalls();
+    }
+
+    private void openInstallSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        Intent i = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:" + getContext().getPackageName()));
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        getContext().startActivity(i);
+    }
+
+    @PluginMethod
+    public void getVersion(PluginCall call) {
+        try {
+            Context ctx = getContext();
+            PackageInfo pi = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0);
+            JSObject ret = new JSObject();
+            ret.put("versionName", pi.versionName);
+            long code = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P ? pi.getLongVersionCode() : pi.versionCode;
+            ret.put("versionCode", code);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(String.valueOf(e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void canInstall(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("allowed", canInstallNow());
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void openSettings(PluginCall call) {
+        openInstallSettings();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void downloadAndInstall(final PluginCall call) {
+        final String urlStr = call.getString("url", "");
+        final String sha256 = call.getString("sha256", "");
+
+        if (urlStr == null || !urlStr.startsWith("https://")) {
+            call.reject("Нужна https-ссылка на APK");
+            return;
+        }
+
+        if (!canInstallNow()) {
+            openInstallSettings();
+            JSObject ret = new JSObject();
+            ret.put("status", "need_permission");
+            call.resolve(ret);
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                File dir = new File(getContext().getCacheDir(), "updates");
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+                File apk = new File(dir, "update.apk");
+                if (apk.exists()) //noinspection ResultOfMethodCallIgnored
+                    apk.delete();
+
+                HttpURLConnection c = (HttpURLConnection) new URL(urlStr).openConnection();
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(30000);
+                c.setInstanceFollowRedirects(true);
+                c.connect();
+                int code = c.getResponseCode();
+                if (code != 200) throw new Exception("Сервер ответил HTTP " + code);
+
+                long total = c.getContentLength();
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                long received = 0;
+                int lastPct = -1;
+
+                try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(apk)) {
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        md.update(buf, 0, n);
+                        received += n;
+                        if (total > 0) {
+                            int pct = (int) (received * 100 / total);
+                            if (pct != lastPct) {
+                                lastPct = pct;
+                                JSObject p = new JSObject();
+                                p.put("percent", pct);
+                                p.put("received", received);
+                                p.put("total", total);
+                                notifyListeners("progress", p);
+                            }
+                        }
+                    }
+                }
+
+                if (sha256 != null && !sha256.isEmpty()) {
+                    StringBuilder hex = new StringBuilder();
+                    for (byte b : md.digest()) hex.append(String.format("%02x", b));
+                    if (!hex.toString().equalsIgnoreCase(sha256.trim())) {
+                        //noinspection ResultOfMethodCallIgnored
+                        apk.delete();
+                        throw new Exception("Контрольная сумма не совпала — файл повреждён или подменён");
+                    }
+                }
+
+                Context ctx = getContext();
+                Uri uri = FileProvider.getUriForFile(ctx, ctx.getPackageName() + ".ghostupdate", apk);
+                Intent install = new Intent(Intent.ACTION_VIEW);
+                install.setDataAndType(uri, "application/vnd.android.package-archive");
+                install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(install);
+
+                JSObject ret = new JSObject();
+                ret.put("status", "installing");
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject(String.valueOf(e.getMessage()));
+            }
+        }).start();
+    }
+}
+
+===== android-plugin/GhostFileProvider.java.tpl =====
+package __APP_PACKAGE__;
+
+import androidx.core.content.FileProvider;
+
+/** Отдельный FileProvider для выдачи скачанного APK установщику (не конфликтует с провайдером Capacitor). */
+public class GhostFileProvider extends FileProvider {}
+
+===== android-plugin/MainActivity.java.tpl =====
+package __APP_PACKAGE__;
+
+import android.os.Build;
+import android.os.Bundle;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.work.Constraints;
+import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.NetworkType;
+import androidx.work.PeriodicWorkRequest;
+import androidx.work.WorkManager;
+import com.getcapacitor.BridgeActivity;
+import java.util.concurrent.TimeUnit;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(ApkInstallerPlugin.class);
+        super.onCreate(savedInstanceState);
+
+        // Android 13+: без этого разрешения уведомления об обновлениях не показываются
+        if (Build.VERSION.SDK_INT >= 33
+                && ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS")
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{"android.permission.POST_NOTIFICATIONS"}, 7001);
+        }
+
+        // Фоновая проверка обновлений раз в 6 часов (работает при закрытом приложении)
+        try {
+            Constraints net = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
+            PeriodicWorkRequest req = new PeriodicWorkRequest.Builder(UpdateWorker.class, 6, TimeUnit.HOURS)
+                    .setConstraints(net)
+                    .build();
+            WorkManager.getInstance(getApplicationContext())
+                    .enqueueUniquePeriodicWork("morphin_update_check", ExistingPeriodicWorkPolicy.KEEP, req);
+        } catch (Exception ignored) {
+            // фоновая проверка — приятное дополнение; приложение должно запускаться в любом случае
+        }
+    }
+}
+
+===== android-plugin/UpdateWorker.java.tpl =====
+package __APP_PACKAGE__;
+
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.os.Build;
+import androidx.annotation.NonNull;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
+import androidx.work.Worker;
+import androidx.work.WorkerParameters;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import org.json.JSONObject;
+
+/**
+ * Фоновая проверка обновлений: раз в несколько часов (даже когда приложение закрыто, а компьютер выключен)
+ * читает version.json с GitHub и, если вышла новая версия, показывает системное уведомление.
+ */
+public class UpdateWorker extends Worker {
+    static final String CHANNEL_ID = "morphin_updates";
+
+    public UpdateWorker(@NonNull Context context, @NonNull WorkerParameters params) {
+        super(context, params);
+    }
+
+    @NonNull
+    @Override
+    public Result doWork() {
+        try {
+            Context ctx = getApplicationContext();
+            int resId = ctx.getResources().getIdentifier("ghost_update_url", "string", ctx.getPackageName());
+            if (resId == 0) return Result.success();
+            String url = ctx.getString(resId);
+            if (url == null || !url.startsWith("https://")) return Result.success();
+
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(20000);
+            c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("Cache-Control", "no-cache");
+            if (c.getResponseCode() != 200) return Result.retry();
+
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"))) {
+                String line;
+                while ((line = r.readLine()) != null) sb.append(line);
+            }
+            JSONObject info = new JSONObject(sb.toString());
+            String latest = info.optString("version", "");
+            String notes = info.optString("notes", "");
+
+            PackageInfo pi = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0);
+            String current = pi.versionName == null ? "0" : pi.versionName;
+
+            if (cmp(latest, current) > 0) {
+                SharedPreferences sp = ctx.getSharedPreferences("morphin_updates", Context.MODE_PRIVATE);
+                if (!latest.equals(sp.getString("notified", ""))) {
+                    if (notify(ctx, latest, notes)) sp.edit().putString("notified", latest).apply();
+                }
+            }
+            return Result.success();
+        } catch (Exception e) {
+            return Result.retry();
+        }
+    }
+
+    private boolean notify(Context ctx, String latest, String notes) {
+        NotificationManagerCompat nm = NotificationManagerCompat.from(ctx);
+        if (!nm.areNotificationsEnabled()) return false;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Обновления", NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("Уведомления о новых версиях приложения");
+            NotificationManager sys = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (sys != null) sys.createNotificationChannel(ch);
+        }
+
+        Intent launch = ctx.getPackageManager().getLaunchIntentForPackage(ctx.getPackageName());
+        if (launch == null) return false;
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+        PendingIntent pi = PendingIntent.getActivity(ctx, 0, launch, flags);
+
+        int icon = ctx.getResources().getIdentifier("ic_stat_update", "drawable", ctx.getPackageName());
+        if (icon == 0) icon = android.R.drawable.stat_sys_download_done;
+
+        String text = (notes == null || notes.isEmpty()) ? "Нажмите, чтобы открыть и обновить" : notes;
+        NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(icon)
+                .setContentTitle("Доступно обновление " + latest)
+                .setContentText(text)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pi);
+        try {
+            nm.notify(7001, b.build());
+            return true;
+        } catch (SecurityException e) {
+            return false;
+        }
+    }
+
+    /** Сравнение версий вида 1.2.3: >0 если a новее b. */
+    static int cmp(String a, String b) {
+        String[] pa = a.replaceFirst("^v", "").split("\\.");
+        String[] pb = b.replaceFirst("^v", "").split("\\.");
+        int n = Math.max(pa.length, pb.length);
+        for (int i = 0; i < n; i++) {
+            int x = i < pa.length ? num(pa[i]) : 0;
+            int y = i < pb.length ? num(pb[i]) : 0;
+            if (x != y) return x > y ? 1 : -1;
+        }
+        return 0;
+    }
+
+    private static int num(String s) {
+        try {
+            return Integer.parseInt(s.replaceAll("[^0-9]", ""));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+}
+
+===== android-plugin/ghost_update_paths.xml =====
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>
+
+===== android-plugin/ic_stat_update.xml =====
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2L21,7V17L12,22L3,17V7L12,2ZM12,5.2L5.8,8.6V15.4L12,18.8L18.2,15.4V8.6L12,5.2ZM12,8.5C13.9,8.5 15.5,10.1 15.5,12C15.5,13.9 13.9,15.5 12,15.5C10.1,15.5 8.5,13.9 8.5,12C8.5,10.1 10.1,8.5 12,8.5Z" />
+</vector>
+
+===== android-plugin/res/values/ic_launcher_background.xml =====
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#06090D</color>
+</resources>
+
+===== capacitor.config.json =====
+{
+  "appId": "com.morphin.ghost",
+  "appName": "Ghost",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  },
+  "backgroundColor": "#06090d",
+  "android": {
+    "backgroundColor": "#06090d"
+  }
+}
+
+===== electron/lib/oem.cjs =====
+// Консольные программы Windows пишут в «OEM»-кодировке (на русской Windows это cp866).
+// Определяем её один раз и раскодируем вывод, чтобы вместо кириллицы не было «кракозябр».
+const { execSync } = require('child_process');
+
+let label = null;
+
+function oemLabel() {
+  if (label) return label;
+  label = 'utf-8';
+  if (process.platform === 'win32') {
+    try {
+      const out = execSync('chcp', { windowsHide: true }).toString('latin1');
+      const cp = parseInt((out.match(/(\d{3,5})/) || [])[1], 10);
+      const map = { 866: 'ibm866', 1251: 'windows-1251', 1252: 'windows-1252', 437: 'windows-1252', 850: 'windows-1252', 65001: 'utf-8' };
+      label = map[cp] || 'utf-8';
+    } catch { /* оставляем utf-8 */ }
+  }
+  return label;
+}
+
+const makeDecoder = () => new TextDecoder(oemLabel());
+const decodeAll = (buf) => makeDecoder().decode(buf);
+
+module.exports = { oemLabel, makeDecoder, decodeAll };
+
+===== electron/lib/run.cjs =====
+// Запуск консольных команд с правильной кодировкой вывода.
+const { spawn } = require('child_process');
+const { decodeAll } = require('./oem.cjs');
+
+// opts: { timeout (мс), cwd, verbatim (для cmd.exe — передать аргументы как есть) }
+function run(file, args, { timeout = 15000, cwd, verbatim = false } = {}) {
+  return new Promise((resolve) => {
+    let p;
+    try {
+      p = spawn(file, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: cwd || undefined, windowsVerbatimArguments: verbatim });
+    } catch (e) { resolve({ code: -1, stdout: '', stderr: String(e) }); return; }
+    const out = [], err = [];
+    const timer = setTimeout(() => p.kill(), timeout);
+    p.stdout.on('data', (d) => out.push(d));
+    p.stderr.on('data', (d) => err.push(d));
+    p.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: '', stderr: String(e) }); });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout: decodeAll(Buffer.concat(out)), stderr: decodeAll(Buffer.concat(err)) });
+    });
+  });
+}
+
+const POWERSHELL_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'];
+const ps = (script, opts) => run('powershell.exe', [...POWERSHELL_ARGS, script], opts);
+
+module.exports = { run, ps, POWERSHELL_ARGS };
+
+===== electron/main.cjs =====
+// Главный процесс Windows-версии. Логику функций сюда не пишем:
+// любой файл electron/modules/*.cjs подхватывается автоматически (см. loadModules ниже).
+
+const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
+const fs = require('fs');
+const path = require('path');
+
+let APP_TITLE = 'Ghost';
+try { APP_TITLE = require('../ghost.config.json').appName || APP_TITLE; } catch { /* нет конфига — оставляем имя по умолчанию */ }
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
+let win = null;
+const getWin = () => (win && !win.isDestroyed() ? win : null);
+const send = (channel, payload) => { const w = getWin(); if (w) w.webContents.send(channel, payload); };
+
+function createWindow() {
+  const devUrl = process.env.GHOST_DEV_URL;
+  win = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 820,
+    minHeight: 560,
+    show: false,
+    title: APP_TITLE,
+    backgroundColor: '#06080b',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#06080b', symbolColor: '#2ee6ff', height: 44 },
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      devTools: !app.isPackaged || process.env.GHOST_DEVTOOLS === '1',
+    },
+  });
+
+  win.once('ready-to-show', () => win.show());
+  if (devUrl) win.loadURL(devUrl);
+  else win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+
+  // Внешние ссылки — в браузер; внутри окна никуда уходить нельзя.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith('file://') && !(devUrl && url.startsWith(devUrl))) e.preventDefault();
+  });
+  win.on('closed', () => { win = null; });
+}
+
+/** Подгружает electron/modules/*.cjs. Файл вида: module.exports = { handlers: { 'имя:действие': async (args, ctx) => ... } } */
+function loadModules() {
+  const dir = path.join(__dirname, 'modules');
+  const ctx = { app, getWin, send };
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith('.cjs') || file.startsWith('_')) continue;
+    try {
+      const mod = require(path.join(dir, file));
+      for (const [channel, fn] of Object.entries(mod.handlers || {})) {
+        ipcMain.handle(channel, (event, args) => fn(args || {}, ctx));
+      }
+      if (typeof mod.init === 'function') mod.init(ctx);
+    } catch (err) {
+      console.error('[ghost] модуль ' + file + ' не загрузился:', err);
+    }
+  }
+}
+
+app.on('second-instance', () => {
+  const w = getWin();
+  if (w) { if (w.isMinimized()) w.restore(); w.focus(); }
+});
+
+app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
+  loadModules();
+  createWindow();
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+});
+
+app.on('window-all-closed', () => app.quit());
+
+===== electron/modules/http.cjs =====
+// HTTP(S)-запросы из основного процесса: так у страницы нет проблем с CORS.
+// Разрешён HTTPS, а обычный http — только для localhost (например, локальный ИИ Ollama).
+module.exports = {
+  handlers: {
+    'net:fetch': async ({ url, method = 'GET', headers = {}, body, timeout = 10000 }) => {
+      const u = new URL(url);
+      const local = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+      if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) throw new Error('Разрешён только HTTPS (http — только для localhost)');
+      const m = String(method).toUpperCase();
+      if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'].includes(m)) throw new Error('Метод не поддерживается: ' + m);
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), Math.min(Math.max(+timeout || 10000, 1000), 600000));
+      try {
+        const r = await fetch(url, { method: m, headers, body: m === 'GET' || m === 'HEAD' ? undefined : body, signal: ctrl.signal, redirect: 'follow' });
+        const text = await r.text();
+        return { status: r.status, text: text.slice(0, 4_000_000) };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  },
+};
+
+===== electron/modules/netscan.cjs =====
+// Сетевые функции Windows-версии: поиск устройств в LAN, сканер портов, список Wi-Fi.
+// ВАЖНО: сканер портов принимает ТОЛЬКО локальные адреса (ваша сеть / ваши устройства).
+const dgram = require('dgram');
+const dns = require('dns').promises;
+const net = require('net');
+const os = require('os');
+const { run } = require('../lib/run.cjs');
+
+/* ───────── ограничение на локальные адреса ───────── */
+function isPrivateIPv4(ip) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return false;
+  const [a, b, c, d] = m.slice(1).map(Number);
+  if ([a, b, c, d].some((n) => n > 255)) return false;
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+
+function parsePorts(spec) {
+  const set = new Set();
+  for (const part of String(spec || '').split(',')) {
+    const t = part.trim();
+    if (!t) continue;
+    const r = /^(\d+)(?:-(\d+))?$/.exec(t);
+    if (!r) throw new Error('Не понял порты: ' + t);
+    const from = +r[1], to = r[2] ? +r[2] : from;
+    if (from < 1 || to > 65535 || from > to) throw new Error('Порты должны быть в диапазоне 1–65535: ' + t);
+    for (let p = from; p <= to; p++) set.add(p);
+    if (set.size > 10000) throw new Error('Слишком много портов (максимум 10000 за раз)');
+  }
+  if (!set.size) throw new Error('Не указаны порты');
+  return [...set];
+}
+
+function probe(host, port, timeout) {
+  return new Promise((resolve) => {
+    const s = new net.Socket();
+    let done = false;
+    const end = (ok) => { if (!done) { done = true; s.destroy(); resolve(ok); } };
+    s.setTimeout(timeout);
+    s.once('connect', () => end(true));
+    s.once('timeout', () => end(false));
+    s.once('error', () => end(false));
+    s.connect(port, host);
+  });
+}
+
+/* ───────── устройства в сети ───────── */
+function localSubnet() {
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal && isPrivateIPv4(a.address) && !a.address.startsWith('169.254.')) {
+        return { ip: a.address, base: a.address.split('.').slice(0, 3).join('.') };
+      }
+    }
+  }
+  return null;
+}
+
+/** «Будим» соседей UDP-пакетами, чтобы они попали в ARP-таблицу. */
+function wake(base) {
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket('udp4');
+    sock.on('error', () => {});
+    let sent = 0;
+    for (let i = 1; i < 255; i++) {
+      sock.send(Buffer.from([0]), 9, base + '.' + i, () => { if (++sent >= 254) setTimeout(() => { try { sock.close(); } catch { /* */ } resolve(); }, 1200); });
+    }
+  });
+}
+
+function parseArp(text) {
+  const devices = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f]{2}(?:-[0-9a-f]{2}){5})\s+(\S+)/i.exec(line);
+    if (!m) continue;
+    const [, ip, macRaw] = m;
+    const mac = macRaw.toLowerCase();
+    if (mac === 'ff-ff-ff-ff-ff-ff' || mac.startsWith('01-00-5e') || mac.startsWith('33-33')) continue;
+    if (!isPrivateIPv4(ip) || ip.endsWith('.255')) continue;
+    devices.push({ ip, mac: mac.replace(/-/g, ':') });
+  }
+  return devices;
+}
+
+async function reverseName(ip) {
+  try {
+    const names = await Promise.race([dns.reverse(ip), new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 800))]);
+    return names && names[0] ? names[0] : '';
+  } catch { return ''; }
+}
+
+/* ───────── Wi-Fi ───────── */
+function parseWifi(text) {
+  const nets = [];
+  let cur = null, bss = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    let m;
+    if ((m = /^SSID\s+\d+\s*:\s*(.*)$/i.exec(line))) {
+      cur = { ssid: m[1] || '(скрытая)', auth: '', enc: '', bssids: [] };
+      nets.push(cur); bss = null; continue;
+    }
+    if (!cur) continue;
+    if ((m = /^BSSID\s+\d+\s*:\s*(.*)$/i.exec(line))) {
+      bss = { mac: m[1], signal: 0, channel: '' };
+      cur.bssids.push(bss); continue;
+    }
+    const kv = /^([^:]+?)\s*:\s*(.*)$/.exec(line);
+    if (!kv) continue;
+    const key = kv[1].toLowerCase(), val = kv[2];
+    if (!bss) {
+      if (/authentication|проверка подлинности/.test(key)) cur.auth = val;
+      else if (/encryption|шифрование/.test(key)) cur.enc = val;
+    } else if (/signal|сигнал/.test(key)) bss.signal = parseInt(val, 10) || 0;
+    else if (/channel|канал/.test(key) && !bss.channel) bss.channel = val;
+  }
+  return nets
+    .map((n) => ({ ...n, signal: Math.max(0, ...n.bssids.map((b) => b.signal)), channel: (n.bssids[0] || {}).channel || '' }))
+    .sort((a, b) => b.signal - a.signal);
+}
+
+module.exports = {
+  parseWifi, parseArp, parsePorts, isPrivateIPv4, // экспортируем для проверок
+  handlers: {
+    'net:lan': async () => {
+      const sub = localSubnet();
+      if (sub) await wake(sub.base);
+      const r = await run('arp', ['-a']);
+      const devices = parseArp(r.stdout);
+      await Promise.all(devices.map(async (d) => { d.name = await reverseName(d.ip); }));
+      devices.sort((a, b) => a.ip.split('.').map(Number).reduce((x, y) => x * 256 + y) - b.ip.split('.').map(Number).reduce((x, y) => x * 256 + y));
+      return { subnet: sub ? sub.base + '.0/24' : '', devices };
+    },
+
+    'net:portscan': async ({ host, ports, timeout = 700 }, { send }) => {
+      const target = String(host || '').trim().toLowerCase() === 'localhost' ? '127.0.0.1' : String(host || '').trim();
+      if (!isPrivateIPv4(target)) {
+        throw new Error('Разрешено сканировать только локальные адреса: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, 127.0.0.1');
+      }
+      const list = parsePorts(ports);
+      const open = [];
+      let done = 0, idx = 0;
+      const t0 = Date.now();
+      const worker = async () => {
+        while (idx < list.length) {
+          const port = list[idx++];
+          if (await probe(target, port, Math.min(Math.max(+timeout || 700, 200), 3000))) open.push(port);
+          done++;
+          if (done % 100 === 0 || done === list.length) send('net:progress', { done, total: list.length, open: open.length });
+        }
+      };
+      await Promise.all(Array.from({ length: 200 }, worker));
+      return { open: open.sort((a, b) => a - b), total: list.length, ms: Date.now() - t0 };
+    },
+
+    'net:wifi': async () => {
+      const r = await run('netsh', ['wlan', 'show', 'networks', 'mode=bssid'], { timeout: 20000 });
+      return parseWifi(r.stdout);
+    },
+  },
+};
+
+===== electron/modules/shell.cjs =====
+// Общая «дверь в систему» для плагинов, написанных ИИ: ctx.sh('команда') → { code, stdout, stderr }.
+// Работает только в Windows-версии. Плагины ставит сам владелец приложения (Студия просит подтверждение).
+const { run, ps } = require('../lib/run.cjs');
+
+module.exports = {
+  handlers: {
+    'shell:exec': async ({ cmd, shell = 'powershell', cwd, timeout = 30000 }) => {
+      if (typeof cmd !== 'string' || !cmd.trim()) throw new Error('Пустая команда');
+      const t = Math.min(Math.max(+timeout || 30000, 1000), 600000);
+      const opts = { timeout: t, cwd: cwd || undefined };
+      const r = shell === 'cmd'
+        ? await run('cmd.exe', ['/d', '/s', '/c', '"' + cmd + '"'], { ...opts, verbatim: true })
+        : await ps(cmd, opts);
+      return { code: r.code, stdout: r.stdout.slice(0, 1_000_000), stderr: r.stderr.slice(0, 1_000_000) };
+    },
+  },
+};
+
+===== electron/modules/system.cjs =====
+const os = require('os');
+const { ps } = require('../lib/run.cjs');
+
+let prev = null;
+
+function cpuPercent() {
+  const cur = os.cpus().reduce((acc, c) => {
+    const t = c.times;
+    acc.idle += t.idle;
+    acc.total += t.user + t.nice + t.sys + t.idle + t.irq;
+    return acc;
+  }, { idle: 0, total: 0 });
+  let pct = 0;
+  if (prev) {
+    const di = cur.idle - prev.idle, dt = cur.total - prev.total;
+    pct = dt > 0 ? Math.round((1 - di / dt) * 100) : 0;
+  }
+  prev = cur;
+  return pct;
+}
+
+function ifaces() {
+  const list = [];
+  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) list.push({ name, address: a.address, mac: a.mac, netmask: a.netmask });
+    }
+  }
+  return list;
+}
+
+module.exports = {
+  handlers: {
+    'system:info': async () => ({
+      hostname: os.hostname(),
+      platform: os.platform(),
+      release: os.version ? os.version() : os.release(),
+      arch: os.arch(),
+      cpu: (os.cpus()[0] && os.cpus()[0].model.trim()) || 'CPU',
+      cores: os.cpus().length,
+      totalmem: os.totalmem(),
+      user: os.userInfo().username,
+      ifaces: ifaces(),
+    }),
+    'system:stats': async () => ({ cpu: cpuPercent(), total: os.totalmem(), free: os.freemem(), uptime: os.uptime() }),
+    'system:top': async () => {
+      const r = await ps('Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,WorkingSet64 | ConvertTo-Json -Compress');
+      try {
+        const j = JSON.parse(r.stdout);
+        return Array.isArray(j) ? j : [j];
+      } catch { return []; }
+    },
+  },
+};
+
+===== electron/modules/terminal.cjs =====
+const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { makeDecoder } = require('../lib/oem.cjs');
+const { POWERSHELL_ARGS } = require('../lib/run.cjs');
+
+const procs = new Map();
+
+module.exports = {
+  handlers: {
+    'terminal:home': async () => os.homedir(),
+
+    'terminal:cd': async ({ cwd, target }) => {
+      let t = String(target || '~').trim().replace(/^\/d\s+/i, '').replace(/^["']|["']$/g, '');
+      if (t === '~' || t === '') t = os.homedir();
+      const next = path.resolve(cwd || os.homedir(), t);
+      if (!fs.existsSync(next) || !fs.statSync(next).isDirectory()) throw new Error('Папка не найдена: ' + next);
+      return next;
+    },
+
+    'terminal:run': async ({ id, shell, cmd, cwd }, { send }) => {
+      const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
+      let file, args, verbatim = false;
+      if (shell === 'cmd') {
+        file = 'cmd.exe';
+        args = ['/d', '/s', '/c', '"' + cmd + '"'];
+        verbatim = true;
+      } else {
+        file = 'powershell.exe';
+        args = [...POWERSHELL_ARGS, cmd];
+      }
+      const p = spawn(file, args, { cwd: dir, windowsHide: true, windowsVerbatimArguments: verbatim, stdio: ['ignore', 'pipe', 'pipe'] });
+      procs.set(id, p);
+      const outDec = makeDecoder(), errDec = makeDecoder();
+      p.stdout.on('data', (d) => send('terminal:data', { id, text: outDec.decode(d, { stream: true }) }));
+      p.stderr.on('data', (d) => send('terminal:data', { id, text: errDec.decode(d, { stream: true }), err: true }));
+      p.on('error', (e) => { send('terminal:data', { id, text: String(e) + '\n', err: true }); });
+      p.on('close', (code) => { procs.delete(id); send('terminal:exit', { id, code }); });
+      return { started: true };
+    },
+
+    'terminal:kill': async ({ id }) => {
+      const p = procs.get(id);
+      if (p && p.pid) spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { windowsHide: true });
+      return { killed: !!p };
+    },
+  },
+};
+
+===== electron/modules/updater.cjs =====
+// Автообновление Windows-версии через electron-updater.
+// Источник: ghost.config.json → updateBaseUrl или GitHub Releases (repo). Файл latest.yml лежит в релизе.
+const fs = require('fs');
+const path = require('path');
+const { app } = require('electron');
+
+function readConfig() {
+  try { return JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'ghost.config.json'), 'utf8')); }
+  catch { return {}; }
+}
+
+function baseUrl() {
+  const c = readConfig();
+  if (c.updateBaseUrl) return String(c.updateBaseUrl).replace(/\/+$/, '');
+  if (c.repo && !/^YOUR_/i.test(c.repo)) return 'https://github.com/' + c.repo + '/releases/latest/download';
+  return null;
+}
+
+let updater = null;
+
+function getUpdater(send) {
+  if (updater) return updater;
+  const { autoUpdater } = require('electron-updater');
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.on('download-progress', (p) => send('update:progress', { percent: Math.round(p.percent), speed: p.bytesPerSecond }));
+  updater = autoUpdater;
+  return updater;
+}
+
+module.exports = {
+  handlers: {
+    'update:check': async (_args, { send }) => {
+      const current = app.getVersion();
+      if (!app.isPackaged) return { status: 'dev', current };
+      const url = baseUrl();
+      if (!url) return { status: 'unconfigured', current };
+      const u = getUpdater(send);
+      u.setFeedURL({ provider: 'generic', url });
+      const r = await u.checkForUpdates();
+      const info = r && r.updateInfo;
+      if (r && r.isUpdateAvailable) {
+        return {
+          status: 'available', current, latest: info.version,
+          notes: typeof info.releaseNotes === 'string' ? info.releaseNotes : '',
+        };
+      }
+      return { status: 'latest', current, latest: info ? info.version : current };
+    },
+
+    'update:download': async (_args, { send }) => {
+      await getUpdater(send).downloadUpdate();
+      return { status: 'downloaded' };
+    },
+
+    'update:install': async (_args, { send }) => {
+      // (isSilent, isForceRunAfter): ставим тихо и сразу запускаем новую версию
+      setTimeout(() => getUpdater(send).quitAndInstall(true, true), 300);
+      return { status: 'installing' };
+    },
+  },
+};
+
+===== electron/preload.cjs =====
+// Безопасный мост между страницей и системой. Страница видит только window.ghost.
+const { contextBridge, ipcRenderer } = require('electron');
+
+const OK = /^[a-z]+:[\w-]+$/; // каналы вида "terminal:run"
+
+contextBridge.exposeInMainWorld('ghost', {
+  platform: 'win',
+  invoke: (channel, args) => {
+    if (!OK.test(channel)) return Promise.reject(new Error('Канал запрещён: ' + channel));
+    return ipcRenderer.invoke(channel, args);
+  },
+  on: (channel, cb) => {
+    if (!OK.test(channel)) return () => {};
+    const fn = (_event, payload) => cb(payload);
+    ipcRenderer.on(channel, fn);
+    return () => ipcRenderer.removeListener(channel, fn);
+  },
+});
+
+===== ghost.config.json =====
+{
+  "appName": "Ghost",
+  "slug": "Ghost",
+  "author": "Morphin",
+  "repo": "YOUR_GITHUB_NAME/ghost",
+  "updateBaseUrl": "",
+  "setupDone": false
+}
+
+===== package.json =====
+{
+  "name": "ghost-app",
+  "productName": "Ghost",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Модульное приложение в стиле хакерского HUD для Windows и Android — сделано Morphin",
+  "author": "Morphin",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "node scripts/check.mjs",
+    "win:dev": "vite build && electron .",
+    "win:build": "vite build && electron-builder --win --publish never --config electron-builder.config.cjs",
+    "android:add": "vite build && cap add android && node scripts/patch-android.mjs && cap sync android",
+    "android:sync": "vite build && cap sync android && node scripts/patch-android.mjs",
+    "release": "node scripts/release.mjs",
+    "add": "node scripts/add-module.mjs",
+    "ai-pack": "node scripts/ai-pack.mjs",
+    "selftest": "node scripts/selftest.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/cli": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.0.0"
+  }
+}

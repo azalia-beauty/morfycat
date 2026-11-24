@@ -1,0 +1,1009 @@
+ЧАСТЬ 3 ИЗ 5. Это не весь контекст: просто отвечай «принято», жди следующую часть.
+
+
+===== src/core/aiprompt.js =====
+// Тексты для ИИ. Здесь нет обращений к браузеру — файл можно импортировать и из Node (scripts/ai-pack.mjs).
+// Если меняете формат плагинов — обновите API_DOC, и все промты (в приложении и в AI-PROMPT.txt) обновятся сами.
+
+export const API_DOC = `ЭТО ПРИЛОЖЕНИЕ — КАК НАПИСАТЬ ФУНКЦИЮ (ПЛАГИН)
+==============================================
+Это приложение для Windows и Android (сделано Morphin) с тёмным «хакерским» HUD-интерфейсом. Каждая функция — отдельный плагин:
+ОДИН файл чистого JavaScript (ES2020), который приложение подгружает прямо во время работы, без пересборки.
+
+ФОРМАТ ФАЙЛА (строго):
+- ровно один «export default { ... }», никаких других export;
+- БЕЗ import и require — всё нужное приходит через аргумент ctx;
+- без TypeScript, JSX, HTML-файлов и сборщиков; без внешних библиотек (только браузерные API: fetch, canvas, crypto, Intl и т.п.);
+
+export default {
+  id: 'my-tool',            // латиница в нижнем регистре, цифры, дефис; 2–32 символа; уникальный
+  title: 'Название',        // подпись в меню
+  icon: '★',                // один символ
+  order: 100,               // позиция в меню (меньше — выше)
+  desc: 'Что делает',       // подпись на плитке главной страницы
+  platforms: ['win'],       // необязательно: ['win'] — только Windows, ['android'] — только Android; без поля — везде
+  async mount(root, ctx) {  // root — пустой <div> страницы плагина
+    // ...строим интерфейс и вешаем обработчики...
+    // можно вернуть функцию очистки: return () => clearInterval(timer);
+  },
+};
+
+ctx (второй аргумент mount):
+- ctx.platform — 'win' | 'android' | 'web';  ctx.version — версия приложения;  ctx.go('id') — перейти на страницу другого модуля.
+- ctx.ui — помощники интерфейса:
+    h(tag, attrs, ...children)  создать элемент. Строки-потомки вставляются как ТЕКСТ. attrs: class, style (объект), onclick и другие on*, value, placeholder, type…
+    panel(title, ...children)   рамка с заголовком
+    button(label, onClick, cls) кнопка; cls: 'primary' | 'danger' | 'ghost' | ''
+    field(label, control)       подпись + поле ввода
+    kv([[ключ, значение], ...]) таблица «ключ — значение» (у результата есть метод .add(k, v))
+    toast(text, kind)           всплывашка; kind: 'info' | 'bad'
+    copy(text)                  скопировать в буфер обмена
+    fmtBytes(n), fmtUptime(sec), drawSpark(canvas, массивЧисел, { max, color })
+- ctx.store — постоянное хранилище ЭТОГО плагина: get(key, default), set(key, value), del(key). Значения — любые JSON-данные.
+- ctx.bridge.http(url, { method, headers, body, timeout }) → Promise<{ status, text }> — сетевой запрос без проблем с CORS
+  (https; method по умолчанию 'GET'; body — строка). ctx.bridge.httpJson(url, opts) → Promise<объект>.
+- ctx.sh(cmd, { shell, cwd, timeout }) → Promise<{ code, stdout, stderr }> — выполнить команду в Windows
+  (shell: 'powershell' по умолчанию или 'cmd'). ТОЛЬКО Windows: такой плагин обязан иметь platforms: ['win'].
+- ctx.ai.ask(prompt, { system }) → Promise<строка> — спросить ИИ (работает, только если пользователь подключил ИИ в Студии, иначе бросает ошибку).
+- ctx.profile.get() → { name, avatar, accent }.
+
+СТИЛЬ. Используй готовые CSS-классы: panel, row (flex-ряд; дочерний элемент с классом grow растягивается), grid (адаптивная сетка),
+btn, chips + chip, table (th/td), out (<pre> для вывода текста), bar (полоса прогресса: внутри <i> с style.width), dim (приглушённый текст),
+ok / warn / err / acc (цвета текста), mt (отступ сверху), small. Поля input / select / textarea уже оформлены.
+Свои цвета не задавай — используй var(--acc), var(--fg), var(--dim), var(--ok), var(--warn), var(--bad).
+
+ПРАВИЛА:
+1. Данные от пользователя и из сети вставляй только через h(...) / textContent, никогда через innerHTML.
+2. Все операции, которые могут упасть (сеть, парсинг, ctx.sh), оборачивай в try/catch и показывай ошибку пользователю (toast или текст на странице).
+3. Таймеры и слушатели снимай в функции очистки, которую возвращает mount.
+4. Интерфейс должен нормально выглядеть на телефоне (узкий экран): без фиксированной ширины больше 100%.
+5. Сканирование сети — только собственные устройства и локальные адреса. Не пиши код для атак, взлома чужих аккаунтов и сетей, вредоносов и слежки за людьми.
+6. Пиши понятные комментарии на русском прямо в коде.`;
+
+export const EXAMPLE = `\`\`\`js
+// Пример плагина: заметки, которые сохраняются между запусками.
+export default {
+  id: 'notes',
+  title: 'Заметки',
+  icon: '✎',
+  order: 120,
+  desc: 'Быстрые заметки',
+  mount(root, ctx) {
+    const { h, panel, button, toast, copy } = ctx.ui;
+    const area = h('textarea', { placeholder: 'Пишите здесь…' });
+    area.value = ctx.store.get('text', '');
+    let t = null;
+    area.addEventListener('input', () => {            // сохраняем через полсекунды после последней буквы
+      clearTimeout(t);
+      t = setTimeout(() => ctx.store.set('text', area.value), 500);
+    });
+    root.append(panel('Заметки', area,
+      h('div', { class: 'row mt' },
+        button('Копировать', () => copy(area.value)),
+        button('Очистить', () => { area.value = ''; ctx.store.set('text', ''); toast('Очищено'); }, 'danger'))));
+    return () => clearTimeout(t);
+  },
+};
+\`\`\``;
+
+const PLATFORM_TEXT = {
+  both: "и Windows, и Android (ctx.sh недоступен на Android: либо не используй его, либо проверяй ctx.platform === 'win')",
+  win: "только Windows (поставь platforms: ['win'], можно использовать ctx.sh)",
+  android: "только Android (поставь platforms: ['android'], ctx.sh недоступен)",
+};
+
+const ANSWER_RULES = `ФОРМАТ ОТВЕТА:
+- верни ОДИН блок кода \`\`\`js … \`\`\` с полным файлом плагина; пояснения — только комментариями внутри кода;
+- файл должен быть ПОЛНЫМ: не сокращай, не пиши «остальное без изменений»;
+- один export default, без import и require; проверь код на синтаксические ошибки перед ответом.`;
+
+/**
+ * Промт для любого чат-ИИ (ChatGPT, Gemini, Claude, DeepSeek, Алиса …): обычный текст, файлы и вложения не нужны.
+ * currentCode — если задан, ИИ дорабатывает существующий плагин.
+ */
+export function buildPluginPrompt({ task = '', platform = 'both', existingIds = [], currentCode = '', compact = false } = {}) {
+  const parts = [];
+  parts.push(currentCode
+    ? 'Ты — разработчик этого приложения. Доработай существующий плагин по моему описанию.'
+    : 'Ты — разработчик этого приложения. Напиши новый плагин по моему описанию.');
+  parts.push('ЗАДАЧА:\n' + (task.trim() || '<<ОПИШИТЕ СЮДА, ЧТО ДОЛЖНА ДЕЛАТЬ ФУНКЦИЯ>>'));
+  parts.push('ПЛАТФОРМА: ' + (PLATFORM_TEXT[platform] || PLATFORM_TEXT.both));
+  if (existingIds.length) parts.push('Занятые id (не использовать): ' + existingIds.join(', '));
+  parts.push(API_DOC);
+  if (!compact) parts.push('ПРИМЕР ПЛАГИНА:\n' + EXAMPLE);
+  if (currentCode) parts.push('ТЕКУЩИЙ КОД ПЛАГИНА (сохрани id, если не просили менять):\n```js\n' + currentCode.trim() + '\n```');
+  parts.push(ANSWER_RULES);
+  return parts.join('\n\n');
+}
+
+/** Системная инструкция для встроенного вызова ИИ (когда ключ подключён в приложении). */
+export const PLUGIN_SYSTEM = 'Ты — разработчик плагинов этого приложения. Отвечаешь только одним блоком кода ```js с полным файлом плагина, без текста вне блока.';
+
+export function buildAvatarImagePrompt({ desc = '', accent = '#2ee6ff' } = {}) {
+  return [
+    'Square 1:1 avatar illustration, centered subject, dark near-black background.',
+    'Style: urban hacker / vigilante, cyber HUD, subtle glitch and scanline effects, neon accent color ' + accent + ', high contrast, clean shapes.',
+    desc.trim() ? 'Subject: ' + desc.trim() : 'Subject: a hooded figure or a mask silhouette lit by a screen glow.',
+    'No text, no logos, no watermarks, no existing characters or brands. Keep important details away from the edges (the picture is cropped to a circle/hexagon).',
+  ].join('\n');
+}
+
+export function buildAvatarSvgPrompt({ desc = '', accent = '#2ee6ff' } = {}) {
+  return [
+    'Нарисуй аватар в виде SVG-кода.',
+    'Требования: один блок ```svg```; корневой <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">; квадрат, тёмный фон; акцентный цвет ' + accent + '.',
+    'Стиль: городской хакер, неоновый HUD, лёгкий глитч (сдвинутые полосы красного и циана), простые векторные формы.',
+    'Без <script>, без внешних ссылок и картинок, без текста и шрифтов, без обработчиков on*.',
+    'Важные детали держи подальше от краёв (аватар обрезается кругом или шестиугольником).',
+    desc.trim() ? 'Что нарисовать: ' + desc.trim() : 'Что нарисовать: силуэт в капюшоне с мерцающим экраном вместо лица.',
+  ].join('\n');
+}
+
+export const AVATAR_SYSTEM = 'Ты рисуешь аватары. Отвечаешь только одним блоком ```svg с корректным SVG (viewBox 0 0 256 256), без пояснений.';
+
+===== src/core/bridge.js =====
+// Мост к «железу»: на Windows — через Electron (IPC), на Android — через плагины Capacitor.
+import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core';
+
+export function detectPlatform() {
+  if (typeof window !== 'undefined' && window.ghost && window.ghost.platform === 'win') return 'win';
+  if (Capacitor.isNativePlatform()) return 'android';
+  return 'web';
+}
+
+export const platform = detectPlatform();
+
+/** Нативный плагин установки APK (см. android-plugin/). Есть только на Android. */
+export const ApkInstaller = registerPlugin('ApkInstaller');
+
+/** Вызвать обработчик из electron/modules/*.cjs (только Windows). */
+export function invoke(channel, args) {
+  if (platform !== 'win') {
+    return Promise.reject(new Error('Эта функция доступна только в Windows-версии'));
+  }
+  return window.ghost.invoke(channel, args);
+}
+
+/** Подписаться на событие из Electron. Возвращает функцию отписки. */
+export function on(channel, cb) {
+  if (platform !== 'win') return () => {};
+  return window.ghost.on(channel, cb);
+}
+
+/** Выполнить команду в Windows: sh('ipconfig') → { code, stdout, stderr }. На других платформах — ошибка. */
+export function sh(cmd, opts = {}) {
+  return invoke('shell:exec', { cmd, ...opts });
+}
+
+/**
+ * HTTPS-запрос без проблем с CORS:
+ * Windows — через основной процесс Electron, Android — через нативный HTTP, браузер — fetch.
+ * Возвращает { status, text }.
+ */
+export async function http(url, { method = 'GET', headers = {}, body, timeout = 10000 } = {}) {
+  if (platform === 'win') {
+    return invoke('net:fetch', { url, method, headers, body, timeout });
+  }
+  if (platform === 'android') {
+    let r;
+    if (method === 'GET') {
+      r = await CapacitorHttp.get({ url, headers, connectTimeout: timeout, readTimeout: timeout, responseType: 'text' });
+    } else {
+      const ct = Object.entries(headers).find(([k]) => k.toLowerCase() === 'content-type');
+      const isJson = !!ct && /json/i.test(ct[1]);
+      r = await CapacitorHttp.request({
+        url, method, headers,
+        data: body == null ? undefined : (isJson ? JSON.parse(body) : body),
+        connectTimeout: timeout, readTimeout: timeout, responseType: 'text',
+      });
+    }
+    const text = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
+    return { status: r.status, text };
+  }
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const r = await fetch(url, { method, headers, body: method === 'GET' ? undefined : body, signal: ctrl.signal });
+    return { status: r.status, text: await r.text() };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+export async function httpJson(url, opts) {
+  const r = await http(url, opts);
+  if (r.status >= 400) throw new Error('HTTP ' + r.status);
+  return JSON.parse(r.text);
+}
+
+===== src/core/config.js =====
+import raw from '../../ghost.config.json';
+
+export const config = raw;
+export const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev';
+export const APP_NAME = (raw.appName || 'Ghost').trim();
+export const AUTHOR = (raw.author || 'Morphin').trim();
+
+/** Базовый адрес, откуда берутся version.json (Android) и latest.yml (Windows). */
+export function updateBase() {
+  if (raw.updateBaseUrl) return raw.updateBaseUrl.replace(/\/+$/, '');
+  if (raw.repo && !/^YOUR_/i.test(raw.repo)) {
+    return `https://github.com/${raw.repo}/releases/latest/download`;
+  }
+  return '';
+}
+
+===== src/core/llm.js =====
+// Необязательное подключение ИИ прямо в приложении: пишет плагины и рисует авы без копирования промтов.
+// Поддерживаются API формата OpenAI (OpenAI, OpenRouter, Gemini, DeepSeek, Groq, Ollama, LM Studio …) и Anthropic.
+// Ключ хранится только на этом устройстве (память приложения). Запросы идут напрямую к выбранному сервису.
+
+import { lsGet, lsSet } from './store.js';
+import { http } from './bridge.js';
+
+export const PRESETS = {
+  openrouter: { label: 'OpenRouter', kind: 'openai', base: 'https://openrouter.ai/api/v1', model: '', hint: 'модель вида vendor/name — список на openrouter.ai/models (есть бесплатные)' },
+  gemini: { label: 'Google Gemini', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash', hint: 'ключ — в Google AI Studio' },
+  deepseek: { label: 'DeepSeek', kind: 'openai', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat', hint: '' },
+  groq: { label: 'Groq', kind: 'openai', base: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', hint: '' },
+  openai: { label: 'OpenAI', kind: 'openai', base: 'https://api.openai.com/v1', model: 'gpt-4o-mini', hint: '' },
+  anthropic: { label: 'Anthropic (Claude)', kind: 'anthropic', base: 'https://api.anthropic.com', model: 'claude-sonnet-5-5', hint: '' },
+  ollama: { label: 'Ollama (на этом ПК)', kind: 'openai', base: 'http://localhost:11434/v1', model: 'qwen2.5-coder', hint: 'ключ не нужен; только Windows-версия', noKey: true },
+  custom: { label: 'Свой адрес (OpenAI-совместимый)', kind: 'openai', base: '', model: '', hint: 'любой сервер с /chat/completions' },
+};
+
+export const getLlm = () => lsGet('llm', { preset: 'openrouter', base: PRESETS.openrouter.base, model: '', key: '' });
+export const saveLlm = (s) => lsSet('llm', s);
+
+export function isConfigured() {
+  const s = getLlm();
+  const p = PRESETS[s.preset] || PRESETS.custom;
+  return !!(s.base && s.model && (s.key || p.noKey));
+}
+
+/** messages: [{role:'user'|'assistant', content}]. Возвращает текст ответа. */
+export async function ask(messages, { system = '', maxTokens = 8000 } = {}) {
+  if (!isConfigured()) throw new Error('ИИ не подключён: откройте «Студия → ИИ-подключение».');
+  const s = getLlm();
+  const kind = (PRESETS[s.preset] || PRESETS.custom).kind;
+  const base = s.base.replace(/\/+$/, '');
+  let url, headers, body;
+
+  if (kind === 'anthropic') {
+    url = base + '/v1/messages';
+    headers = { 'content-type': 'application/json', 'x-api-key': s.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' };
+    body = { model: s.model, max_tokens: maxTokens, messages, ...(system ? { system } : {}) };
+  } else {
+    url = base + '/chat/completions';
+    headers = { 'content-type': 'application/json', ...(s.key ? { authorization: 'Bearer ' + s.key } : {}) };
+    body = { model: s.model, max_tokens: maxTokens, messages: system ? [{ role: 'system', content: system }, ...messages] : messages };
+  }
+
+  const r = await http(url, { method: 'POST', headers, body: JSON.stringify(body), timeout: 180000 });
+  let j;
+  try { j = JSON.parse(r.text); } catch { throw new Error('Сервис ответил не JSON (HTTP ' + r.status + '): ' + String(r.text).slice(0, 200)); }
+  if (r.status >= 400) {
+    const msg = (j.error && (j.error.message || j.error)) || j.message || r.text;
+    throw new Error('HTTP ' + r.status + ': ' + String(typeof msg === 'string' ? msg : JSON.stringify(msg)).slice(0, 300));
+  }
+  const text = kind === 'anthropic'
+    ? (j.content || []).map((c) => c.text || '').join('')
+    : (((j.choices || [])[0] || {}).message || {}).content;
+  if (!text) throw new Error('Пустой ответ от ИИ');
+  return String(text);
+}
+
+===== src/core/plugins.js =====
+// Плагины, которые ставятся ПРЯМО В ПРИЛОЖЕНИИ (без пересборки): код хранится в памяти приложения
+// и подгружается при запуске. Обычно такой код пишет ИИ по промту из «Студии».
+//
+// Формат плагина — тот же, что у файлов в src/modules/: export default { id, title, mount(root, ctx) }.
+// Отличие: внутри нельзя import — всё нужное приходит через ctx (ctx.ui, ctx.bridge, ctx.store …).
+// Если ИИ всё же написал `import { h } from '../core/ui.js'`, такая строка автоматически переписывается.
+
+import { lsGet, lsSet } from './store.js';
+
+const KEY = 'plugins';
+export const ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
+
+export const listPlugins = () => lsGet(KEY, []);
+
+function saveAll(list) {
+  if (!lsSet(KEY, list)) throw new Error('Не удалось сохранить: память приложения переполнена или недоступна');
+}
+
+/** Достаёт код из ответа ИИ: берёт блок ```js … ``` (лучший по содержимому) или весь текст, если блоков нет. */
+export function extractCode(text) {
+  const t = String(text || '').replace(/^﻿/, '');
+  const blocks = [...t.matchAll(/```[\w+-]*[ \t]*\r?\n([\s\S]*?)```/g)].map((m) => m[1]);
+  if (!blocks.length) {
+    const open = /```[\w+-]*[ \t]*\r?\n([\s\S]*)$/.exec(t); // ответ оборван — закрывающих ``` нет
+    return (open ? open[1] : t).trim();
+  }
+  const withDefault = blocks.filter((b) => /export\s+default/.test(b));
+  return (withDefault.length ? withDefault : blocks).sort((a, b) => b.length - a.length)[0].trim();
+}
+
+/** import из ядра приложения → доступ через globalThis.__ghost (так же работают файлы из src/modules). */
+export function adaptCode(code) {
+  return String(code).replace(
+    /^[ \t]*import\s*\{([^}]*)\}\s*from\s*['"]\.{1,2}\/(?:core\/)?(ui|bridge|config|updater|store)\.js['"];?[ \t]*$/gm,
+    (_, names, mod) => {
+      const n = names.split(',').map((s) => s.trim()).filter(Boolean).map((s) => s.replace(/\s+as\s+/, ': ')).join(', ');
+      return 'const { ' + n + ' } = globalThis.__ghost.' + mod + ';';
+    });
+}
+
+/** Быстрые проверки до запуска кода — с понятными сообщениями. */
+export function lintCode(code) {
+  const c = String(code || '');
+  if (c.trim().length < 30) throw new Error('Код пустой или слишком короткий. Вставьте ответ ИИ целиком.');
+  if (/\brequire\s*\(/.test(c)) throw new Error('require() не поддерживается: плагин — это ES-модуль. Попросите ИИ переписать без require.');
+  if (/^[ \t]*import\s[^\n]*['"]/m.test(adaptCode(c).replace(/from\s*['"]https:\/\/[^'"]+['"]/g, ''))) {
+    throw new Error('import не поддерживается: всё нужное приходит через ctx (ctx.ui, ctx.bridge …). Попросите ИИ убрать import.');
+  }
+  if (!/export\s+default/.test(c)) throw new Error('Не найден «export default { id, title, mount(root, ctx) { … } }».');
+  if (/\/\/\s*\.\.\.\s*(остальн|rest|existing|без изменений|unchanged|same as)/i.test(c)) {
+    throw new Error('ИИ сократил код («остальное без изменений»). Попросите прислать файл ПОЛНОСТЬЮ.');
+  }
+}
+
+async function evaluate(code) {
+  const url = URL.createObjectURL(new Blob([adaptCode(code)], { type: 'text/javascript' }));
+  try {
+    const m = await import(/* @vite-ignore */ url);
+    return m.default;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Полная проверка: код загружается, имеет id и mount, id не занят встроенным модулем. Возвращает объект модуля. */
+export async function validate(code, { builtinIds = new Set() } = {}) {
+  lintCode(code);
+  let m;
+  try { m = await evaluate(code); } catch (e) { throw new Error('Код не загрузился: ' + ((e && e.message) || e)); }
+  if (!m || typeof m !== 'object') throw new Error('export default должен быть объектом { id, title, mount }.');
+  if (!ID_RE.test(m.id || '')) throw new Error('id должен быть латиницей: маленькие буквы, цифры и дефис, 2–32 символа. Сейчас: «' + m.id + '».');
+  if (typeof m.mount !== 'function') throw new Error('Нет метода mount(root, ctx).');
+  if (builtinIds.has(m.id)) throw new Error('id «' + m.id + '» занят встроенным модулем — выберите другой.');
+  return m;
+}
+
+export async function installPlugin(code, builtinIds) {
+  const m = await validate(code, { builtinIds });
+  const list = listPlugins();
+  const now = Date.now();
+  const i = list.findIndex((p) => p.id === m.id);
+  const rec = { id: m.id, title: m.title || m.id, code, enabled: i >= 0 ? list[i].enabled : true, created: i >= 0 ? list[i].created : now, updated: now };
+  if (i >= 0) list[i] = rec; else list.push(rec);
+  saveAll(list);
+  return rec;
+}
+
+export function removePlugin(id) { saveAll(listPlugins().filter((p) => p.id !== id)); }
+
+export function setEnabled(id, on) {
+  saveAll(listPlugins().map((p) => (p.id === id ? { ...p, enabled: !!on } : p)));
+}
+
+/** Загрузка всех включённых плагинов при старте. Сломанный плагин попадает в failed, остальные работают. */
+export async function loadUserPlugins(platform, builtinIds = new Set()) {
+  const mods = [], failed = [], skipped = [];
+  for (const p of listPlugins()) {
+    if (!p.enabled) continue;
+    const file = 'плагин «' + p.id + '»';
+    try {
+      const m = await validate(p.code, { builtinIds });
+      if (m.platforms && !m.platforms.includes(platform)) { skipped.push({ file, id: m.id, platforms: m.platforms }); continue; }
+      mods.push({ icon: '✦', order: 100, title: m.id, ...m, file, user: true });
+    } catch (e) {
+      failed.push({ file, error: String((e && e.message) || e) });
+    }
+  }
+  return { mods, failed, skipped };
+}
+
+===== src/core/profile.js =====
+// Профиль: имя, аватар и акцентный цвет. Хранится на устройстве, применяется на лету.
+import { lsGet, lsSet } from './store.js';
+
+const DEFAULT = { name: 'Оператор', avatar: '', accent: '#2ee6ff' };
+let state = { ...DEFAULT, ...lsGet('profile', {}) };
+const subs = new Set();
+
+export const getProfile = () => ({ ...state });
+export const onProfile = (fn) => { subs.add(fn); return () => subs.delete(fn); };
+
+export function setProfile(patch) {
+  state = { ...state, ...patch };
+  if (!lsSet('profile', state)) throw new Error('Не удалось сохранить профиль (память переполнена)');
+  applyAccent();
+  subs.forEach((f) => { try { f(state); } catch { /* ignore */ } });
+}
+
+export function applyAccent() {
+  const m = /^#([0-9a-f]{6})$/i.exec(state.accent || '');
+  if (!m || typeof document === 'undefined') return;
+  const n = parseInt(m[1], 16);
+  const root = document.documentElement.style;
+  root.setProperty('--acc', state.accent);
+  root.setProperty('--acc-rgb', [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(','));
+}
+
+/* ───────── обработка картинок → квадрат 256×256 ───────── */
+const SIZE = 256;
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Не удалось открыть картинку (поддерживаются PNG, JPG, WebP, GIF, SVG)'));
+    img.src = src;
+  });
+}
+
+function toDataUrl(canvas) {
+  const webp = canvas.toDataURL('image/webp', 0.9);
+  return webp.startsWith('data:image/webp') ? webp : canvas.toDataURL('image/png');
+}
+
+function cropSquare(img) {
+  const c = document.createElement('canvas');
+  c.width = c.height = SIZE;
+  const ctx = c.getContext('2d');
+  const w = img.naturalWidth || img.width || SIZE, h = img.naturalHeight || img.height || SIZE;
+  const s = Math.min(w, h);
+  ctx.fillStyle = '#06080b';
+  ctx.fillRect(0, 0, SIZE, SIZE);
+  ctx.drawImage(img, (w - s) / 2, (h - s) / 2, s, s, 0, 0, SIZE, SIZE);
+  return toDataUrl(c);
+}
+
+export async function fileToAvatar(file) {
+  if (!file || !/^image\//.test(file.type || '')) throw new Error('Нужен файл-картинка');
+  const url = URL.createObjectURL(file);
+  try { return cropSquare(await loadImage(url)); } finally { URL.revokeObjectURL(url); }
+}
+
+/** Убирает из SVG всё исполняемое и внешнее. Рисуется через <img>, где скрипты и так не работают — это второй рубеж. */
+export function sanitizeSvg(text) {
+  const m = /<svg[\s\S]*?<\/svg>/i.exec(String(text || ''));
+  if (!m) throw new Error('В ответе нет SVG-кода (<svg …>…</svg>)');
+  let s = m[0]
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, '')
+    .replace(/(xlink:)?href\s*=\s*("(?!#)[^"]*"|'(?!#)[^']*')/gi, '');
+  if (!/xmlns=/.test(s)) s = s.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  if (!/viewBox=/i.test(s) && !/\swidth=/i.test(s)) s = s.replace(/<svg/i, '<svg viewBox="0 0 256 256"');
+  return s;
+}
+
+export async function svgToAvatar(text) {
+  const svg = sanitizeSvg(text);
+  const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const img = await loadImage(url);
+  const c = document.createElement('canvas');
+  c.width = c.height = SIZE;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#06080b';
+  ctx.fillRect(0, 0, SIZE, SIZE);
+  ctx.drawImage(img, 0, 0, SIZE, SIZE);
+  return toDataUrl(c);
+}
+
+/* ───────── генератор «аватар из ничего» — работает офлайн ───────── */
+function rng(seed) {
+  let h = 1779033703 ^ String(seed).length;
+  for (let i = 0; i < String(seed).length; i++) { h = Math.imul(h ^ String(seed).charCodeAt(i), 3432918353); h = (h << 13) | (h >>> 19); }
+  let a = (h ^ (h >>> 16)) >>> 0;
+  return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+export function generatedAvatar(seed, accent = '#2ee6ff') {
+  const r = rng(seed || Math.random());
+  const c = document.createElement('canvas');
+  c.width = c.height = SIZE;
+  const x = c.getContext('2d');
+  x.fillStyle = '#06080b'; x.fillRect(0, 0, SIZE, SIZE);
+  x.strokeStyle = 'rgba(255,255,255,.05)';
+  for (let i = 0; i <= SIZE; i += 16) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i, SIZE); x.moveTo(0, i); x.lineTo(SIZE, i); x.stroke(); }
+
+  // симметричный «ID-узор» 5×5
+  const N = 5, cell = 30, off = (SIZE - N * cell) / 2;
+  const cells = [];
+  for (let row = 0; row < N; row++) for (let col = 0; col < 3; col++) if (r() > 0.45) { cells.push([col, row]); if (col < 2) cells.push([N - 1 - col, row]); }
+  const paint = (dx, color, alpha) => {
+    x.fillStyle = color; x.globalAlpha = alpha;
+    cells.forEach(([col, row]) => x.fillRect(off + col * cell + dx, off + row * cell, cell - 4, cell - 4));
+    x.globalAlpha = 1;
+  };
+  paint(-5, '#ff3b5c', 0.7);
+  paint(5, accent, 0.75);
+  paint(0, '#ffffff', 0.95);
+
+  // шестиугольная рамка
+  x.strokeStyle = accent; x.lineWidth = 6; x.beginPath();
+  for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + (k * Math.PI) / 3; const px = SIZE / 2 + 118 * Math.cos(a), py = SIZE / 2 + 118 * Math.sin(a); k ? x.lineTo(px, py) : x.moveTo(px, py); }
+  x.closePath(); x.stroke();
+
+  // глитч-полосы
+  for (let i = 0; i < 4; i++) {
+    const y = Math.floor(r() * 220) + 10, hh = 6 + Math.floor(r() * 14), dx = (r() > 0.5 ? 1 : -1) * (10 + Math.floor(r() * 22));
+    x.drawImage(c, 0, y, SIZE, hh, dx, y, SIZE, hh);
+  }
+  x.fillStyle = 'rgba(0,0,0,.18)';
+  for (let y = 0; y < SIZE; y += 3) x.fillRect(0, y, SIZE, 1);
+  return toDataUrl(c);
+}
+
+===== src/core/registry.js =====
+// Автозагрузка модулей: любой файл src/modules/*.js подхватывается сам.
+// Файлы, имя которых начинается с «_», игнорируются (шаблоны, черновики).
+// Сверх этого подгружаются плагины, установленные в самом приложении (Студия).
+// Сломанный модуль не валит приложение — он просто попадёт в список ошибок.
+
+import { loadUserPlugins } from './plugins.js';
+
+const loaders = import.meta.glob(['../modules/*.js', '!../modules/_*.js']);
+
+export async function loadModules(platform, { safe = false } = {}) {
+  const mods = [];
+  const failed = [];
+  const skipped = [];
+  const builtinIds = new Set();
+
+  for (const [path, load] of Object.entries(loaders)) {
+    const file = path.split('/').pop();
+    try {
+      const m = (await load()).default;
+      if (!m || !m.id || typeof m.mount !== 'function') {
+        throw new Error('модуль должен делать export default { id, title, mount(root, ctx) }');
+      }
+      builtinIds.add(m.id);
+      if (m.platforms && !m.platforms.includes(platform)) {
+        skipped.push({ file, id: m.id, platforms: m.platforms });
+        continue;
+      }
+      mods.push({ icon: '▣', order: 100, title: m.id, ...m, file });
+    } catch (e) {
+      failed.push({ file, error: String((e && e.message) || e) });
+    }
+  }
+
+  if (!safe) {
+    const u = await loadUserPlugins(platform, builtinIds);
+    mods.push(...u.mods);
+    failed.push(...u.failed);
+    skipped.push(...u.skipped);
+  }
+
+  mods.sort((a, b) => a.order - b.order || String(a.title).localeCompare(String(b.title), 'ru'));
+  return { mods, failed, skipped, builtinIds };
+}
+
+===== src/core/store.js =====
+// Безопасная обёртка над localStorage: не падает, если хранилище недоступно или переполнено.
+const P = 'ghost.';
+
+export function lsGet(key, def) {
+  try {
+    const v = localStorage.getItem(P + key);
+    return v == null ? def : JSON.parse(v);
+  } catch { return def; }
+}
+
+export function lsSet(key, val) {
+  try { localStorage.setItem(P + key, JSON.stringify(val)); return true; } catch { return false; }
+}
+
+export function lsDel(key) {
+  try { localStorage.removeItem(P + key); } catch { /* ignore */ }
+}
+
+/** Отдельное хранилище для плагина: ctx.store.get/set/del. Ключи не пересекаются между плагинами. */
+export function storeFor(ns) {
+  const k = (x) => 'plug.' + ns + '.' + x;
+  return { get: (x, d) => lsGet(k(x), d), set: (x, v) => lsSet(k(x), v), del: (x) => lsDel(k(x)) };
+}
+
+===== src/core/ui.js =====
+// Маленькие помощники для построения интерфейса без фреймворка.
+// Всё, что передаётся как строка, вставляется как ТЕКСТ (не HTML) — так безопасно показывать чужие данные.
+
+/** h('div', {class:'x', onclick:fn}, 'текст', h('b', {}, 'жирный')) */
+export function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+    else if (k === 'dataset') Object.assign(el.dataset, v);
+    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
+    else el.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+export const $ = (sel, root = document) => root.querySelector(sel);
+
+const EYE_SVG = '<svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M50 5 89 27.500V72.500L50 95 11 72.500V27.500Z"/>'
+  + '<path d="M20 50Q50 26 80 50Q50 74 20 50Z"/>'
+  + '<circle cx="50" cy="50" r="9"/><circle cx="50" cy="50" r="3.500" fill="currentColor" stroke="none"/>'
+  + '<path d="M50 35.500V39.500M50 60.500V64.500M35.500 50H39.500M60.500 50H64.500" stroke-width="2.500"/></svg>';
+
+/** Логотип-«глаз» (статичная строка, безопасно). */
+export function eyeIcon(cls = '') {
+  const el = document.createElement('span');
+  el.className = cls;
+  el.innerHTML = EYE_SVG;
+  return el;
+}
+
+/** Блок с рамкой и заголовком в стиле HUD. */
+export function panel(title, ...body) {
+  return h('section', { class: 'panel' },
+    title ? h('header', { class: 'panel__title' }, title) : null,
+    h('div', { class: 'panel__body' }, body));
+}
+
+export function button(label, onClick, cls = '') {
+  return h('button', { class: ('btn ' + cls).trim(), type: 'button', onclick: onClick }, label);
+}
+
+export function field(label, control) {
+  return h('label', { class: 'field' }, h('span', { class: 'field__l' }, label), control);
+}
+
+/** Таблица «ключ — значение». Возвращает элемент с методом .add(k, v). */
+export function kv(rows = []) {
+  const el = h('div', { class: 'kv' });
+  el.add = (k, v) => el.append(h('div', { class: 'k' }, k), h('div', { class: 'v' }, v ?? '—'));
+  rows.forEach(([k, v]) => el.add(k, v));
+  return el;
+}
+
+export function toast(msg, kind = 'info') {
+  let box = document.getElementById('toasts');
+  if (!box) {
+    box = h('div', { id: 'toasts', class: 'toasts' });
+    document.body.append(box);
+  }
+  const t = h('div', { class: 'toast toast--' + kind }, msg);
+  box.append(t);
+  setTimeout(() => t.classList.add('toast--out'), 3200);
+  setTimeout(() => t.remove(), 3700);
+}
+
+export async function copy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Скопировано');
+  } catch {
+    toast('Не удалось скопировать', 'bad');
+  }
+}
+
+export function fmtBytes(n) {
+  if (!Number.isFinite(n)) return '—';
+  const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+
+export function fmtUptime(sec) {
+  const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return (d ? d + 'д ' : '') + hh + 'ч ' + m + 'м';
+}
+
+/** Рисует линию-«спарклайн» на canvas. data — массив чисел 0..max. */
+export function drawSpark(canvas, data, { max = 100, color = '#2ee6ff' } = {}) {
+  const c = canvas.getContext('2d');
+  const w = canvas.width, hgt = canvas.height;
+  c.clearRect(0, 0, w, hgt);
+  c.strokeStyle = 'rgba(255,255,255,.06)';
+  c.lineWidth = 1;
+  for (let i = 1; i < 4; i++) { c.beginPath(); c.moveTo(0, (hgt / 4) * i); c.lineTo(w, (hgt / 4) * i); c.stroke(); }
+  if (data.length < 2) return;
+  const step = w / (data.length - 1);
+  c.beginPath();
+  data.forEach((v, i) => {
+    const x = i * step, y = hgt - (Math.min(v, max) / max) * (hgt - 4) - 2;
+    i ? c.lineTo(x, y) : c.moveTo(x, y);
+  });
+  c.strokeStyle = color; c.lineWidth = 2; c.stroke();
+  c.lineTo(w, hgt); c.lineTo(0, hgt); c.closePath();
+  c.fillStyle = color + '22'; c.fill();
+}
+
+===== src/core/updater.js =====
+// Единый интерфейс обновлений для Windows и Android.
+//
+// Windows: electron-updater (electron/modules/updater.cjs) берёт latest.yml и сам ставит новый установщик.
+// Android: приложение читает version.json, скачивает APK и открывает системный установщик
+//          (нужно разрешение «установка из этого источника» — Android спросит один раз).
+
+import { platform, invoke, on, ApkInstaller, http } from './bridge.js';
+import { updateBase } from './config.js';
+
+/** Сравнение версий: 1 если a новее b, -1 если старее, 0 если равны. */
+export function cmpVersions(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * Проверка обновлений. Возвращает объект со status:
+ * 'available' | 'latest' | 'dev' | 'unconfigured' | 'unsupported'
+ */
+export async function checkUpdate() {
+  if (platform === 'win') return invoke('update:check');
+
+  if (platform === 'android') {
+    const base = updateBase();
+    if (!base) return { status: 'unconfigured' };
+    const cur = (await ApkInstaller.getVersion()).versionName;
+    const r = await http(base + '/version.json', { headers: { 'Cache-Control': 'no-cache' } });
+    if (r.status !== 200) throw new Error('version.json: HTTP ' + r.status);
+    const info = JSON.parse(r.text);
+    if (cmpVersions(info.version, cur) > 0) {
+      return {
+        status: 'available', current: cur, latest: info.version,
+        notes: info.notes || '', apk: info.apk, sha256: info.sha256 || '',
+      };
+    }
+    return { status: 'latest', current: cur, latest: info.version };
+  }
+
+  return { status: 'unsupported' };
+}
+
+/**
+ * Скачать и установить. onProgress({percent}) вызывается по ходу загрузки.
+ * Возвращает { status: 'installing' | 'need_permission' }.
+ */
+export async function installUpdate(info, onProgress = () => {}) {
+  if (platform === 'win') {
+    const off = on('update:progress', onProgress);
+    try { await invoke('update:download'); } finally { off(); }
+    onProgress({ percent: 100 });
+    return invoke('update:install');
+  }
+
+  if (platform === 'android') {
+    const sub = await ApkInstaller.addListener('progress', onProgress);
+    try {
+      return await ApkInstaller.downloadAndInstall({ url: info.apk, sha256: info.sha256 || '' });
+    } finally {
+      sub.remove();
+    }
+  }
+
+  throw new Error('Обновления не поддерживаются на этой платформе');
+}
+
+===== src/main.js =====
+import './styles/theme.css';
+import { h, button, toast, eyeIcon } from './core/ui.js';
+import * as ui from './core/ui.js';
+import * as bridge from './core/bridge.js';
+import { platform } from './core/bridge.js';
+import { config, VERSION, APP_NAME, AUTHOR } from './core/config.js';
+import * as updater from './core/updater.js';
+import * as store from './core/store.js';
+import * as llm from './core/llm.js';
+import { lsGet, lsSet, storeFor } from './core/store.js';
+import { getProfile, setProfile, onProfile, applyAccent } from './core/profile.js';
+import { loadModules } from './core/registry.js';
+
+// Плагины, написанные ИИ, берут помощников отсюда (см. adaptCode в core/plugins.js).
+globalThis.__ghost = { ui, bridge, config, updater, store };
+
+const app = document.getElementById('app');
+document.title = APP_NAME;
+document.body.classList.add('plat-' + platform);
+applyAccent();
+
+// Защита от «убийственного» плагина: если прошлый запуск не дожил до конца старта — включаем безопасный режим.
+const crashed = lsGet('booting', 0) === 1;
+const safe = crashed || lsGet('safe', false) === true;
+lsSet('booting', 1);
+const clearBoot = () => lsSet('booting', 0);
+setTimeout(clearBoot, 5000);
+addEventListener('pagehide', clearBoot);
+
+function bootOverlay(lines) {
+  const box = h('pre', { class: 'boot__log' });
+  const fill = h('i');
+  const el = h('div', { class: 'boot' },
+    eyeIcon('boot__eye'),
+    h('div', { class: 'boot__logo glitch', 'data-text': APP_NAME }, APP_NAME),
+    box,
+    h('div', { class: 'boot__bar' }, fill),
+    h('div', { class: 'boot__by' }, 'сделано ', h('b', {}, AUTHOR)));
+  document.body.append(el);
+  let i = 0;
+  const timer = setInterval(() => {
+    if (i < lines.length) {
+      box.textContent += lines[i++] + '\n';
+      fill.style.width = Math.round((i / lines.length) * 100) + '%';
+    } else {
+      clearInterval(timer);
+      el.classList.add('boot--out');
+      setTimeout(() => el.remove(), 550);
+    }
+  }, 110);
+}
+
+async function start() {
+  const registry = await loadModules(platform, { safe });
+  const { mods } = registry;
+  const userCount = mods.filter((m) => m.user).length;
+
+  bootOverlay([
+    '[ OK ] ' + APP_NAME + ' // ядро ' + VERSION,
+    '[ OK ] платформа: ' + platform,
+    '[ OK ] модулей: ' + mods.length + (userCount ? ' (своих: ' + userCount + ')' : '') + (registry.failed.length ? '  ошибок: ' + registry.failed.length : ''),
+    safe ? '[WARN] безопасный режим: свои плагины отключены' : '[ OK ] канал связи готов',
+  ]);
+
+  const baseCtx = {
+    platform, version: VERSION, config, bridge, ui,
+    modules: mods, registry, safe,
+    go: (id) => { location.hash = '#/' + id; },
+    sh: (cmd, opts) => bridge.sh(cmd, opts),
+    ai: {
+      ask: (prompt, opts) => llm.ask([{ role: 'user', content: prompt }], opts),
+      configured: llm.isConfigured,
+    },
+    profile: { get: getProfile, set: setProfile, onChange: onProfile },
+  };
+
+  const view = h('main', { class: 'view' });
+  const nav = h('nav', { class: 'nav' });
+  const banner = h('div', { class: 'banner', hidden: true });
+
+  const navItems = new Map();
+  for (const m of mods) {
+    const item = h('a', { class: 'nav__item', href: '#/' + m.id, title: m.desc || m.title },
+      h('span', { class: 'nav__ico' }, m.icon), h('span', { class: 'nav__lbl' }, m.title));
+    navItems.set(m.id, item);
+    nav.append(item);
+  }
+  nav.append(h('div', { class: 'nav__foot' }, 'v' + VERSION, h('br'), 'сделано ', h('b', {}, AUTHOR)));
+
+  // Аватар и имя в шапке
+  const ava = h('img', { class: 'head__ava', alt: '' });
+  const nameEl = h('span', { class: 'head__name' });
+  const paintProfile = () => {
+    const p = getProfile();
+    nameEl.textContent = p.name;
+    ava.hidden = !p.avatar;
+    if (p.avatar) ava.src = p.avatar;
+  };
+  paintProfile();
+  onProfile(paintProfile);
+
+  app.replaceChildren(
+    h('header', { class: 'head' },
+      h('div', { class: 'head__brand' },
+        eyeIcon('head__mark'),
+        h('div', { class: 'head__logo glitch', 'data-text': APP_NAME }, APP_NAME)),
+      h('div', { class: 'head__meta' }, 'v' + VERSION + ' · by ' + AUTHOR),
+      h('div', { class: 'head__sp' }),
+      h('a', { class: 'who', href: '#/profile', title: 'Профиль' }, ava, nameEl),
+      h('div', { class: 'pill pill--ok' }, h('i'), 'ONLINE')),
+    nav,
+    h('div', { class: 'stage' }, banner, view),
+  );
+
+  function showBanner(text, actions, kind) {
+    banner.hidden = false;
+    banner.className = 'banner' + (kind ? ' banner--' + kind : '');
+    banner.replaceChildren(h('span', {}, text), ...actions);
+  }
+
+  if (safe) {
+    showBanner(
+      crashed ? 'Прошлый запуск не завершился — свои плагины временно отключены.' : 'Безопасный режим: свои плагины отключены.',
+      [button('Включить плагины', () => { lsSet('safe', false); lsSet('booting', 0); location.reload(); }, 'primary')],
+      'bad');
+  }
+
+  let current = null;
+  async function show() {
+    const id = location.hash.replace(/^#\//, '') || (mods[0] && mods[0].id);
+    const m = mods.find((x) => x.id === id) || mods[0];
+    if (!m) { view.textContent = 'Нет ни одного модуля. Добавьте файл в src/modules/'; return; }
+
+    if (current && current.cleanup) { try { current.cleanup(); } catch { /* ignore */ } }
+    current = null;
+    navItems.forEach((el, key) => el.classList.toggle('is-active', key === m.id));
+
+    const root = h('div', { class: 'module module--' + m.id });
+    view.replaceChildren(
+      h('h1', { class: 'view__title' }, h('span', { class: 'view__ico' }, m.icon), m.title),
+      root);
+    view.scrollTop = 0;
+
+    try {
+      const cleanup = await m.mount(root, { ...baseCtx, store: storeFor(m.id) });
+      current = { cleanup: typeof cleanup === 'function' ? cleanup : null };
+    } catch (e) {
+      console.error(e);
+      root.append(h('div', { class: 'panel panel--bad' },
+        h('div', { class: 'panel__title' }, 'Ошибка модуля «' + m.id + '»'),
+        h('pre', { class: 'panel__body' }, String((e && e.stack) || e))));
+    }
+  }
+
+  window.addEventListener('hashchange', show);
+  await show();
+
+  // Фоновая проверка обновлений: если вышла новая версия — показываем плашку «Обновить».
+  setTimeout(async () => {
+    if (!banner.hidden) return;
+    try {
+      const r = await updater.checkUpdate();
+      if (r && r.status === 'available' && mods.some((m) => m.id === 'updates')) {
+        showBanner('Доступна новая версия ' + r.latest + ' (сейчас ' + r.current + ')', [
+          button('Обновить', () => { baseCtx.go('updates'); banner.hidden = true; }, 'primary'),
+          button('✕', () => { banner.hidden = true; }, 'ghost')]);
+        toast('Доступно обновление ' + r.latest);
+      }
+    } catch { /* нет сети или не настроено — молча */ }
+  }, 2500);
+}
+
+start().catch((e) => {
+  console.error(e);
+  app.textContent = 'Ошибка запуска: ' + ((e && e.message) || e);
+});
+
+===== src/modules/_template.js =====
+// ШАБЛОН МОДУЛЯ. Скопируйте этот файл, уберите «_» из начала имени — и модуль появится в меню сам.
+// Менять другие файлы не нужно. Файлы, начинающиеся с «_», приложение игнорирует.
+//
+// ctx содержит:
+//   ctx.platform  — 'win' | 'android' | 'web'
+//   ctx.version   — версия приложения
+//   ctx.go('id')  — перейти в другой модуль
+//   ctx.bridge    — { invoke, on, http, httpJson } — доступ к системе (Windows) и сети
+//   ctx.ui        — { h, panel, button, field, kv, toast, copy, fmtBytes, drawSpark }
+
+import { h, panel, button, toast } from '../core/ui.js';
+
+export default {
+  id: 'example',            // уникальное имя (латиница), попадает в адрес #/example
+  title: 'Пример',          // название в меню
+  icon: '★',                // значок в меню
+  order: 100,               // позиция в меню: меньше — выше
+  desc: 'Что делает модуль', // подпись на плитке главной страницы
+  // platforms: ['win'],    // если нужен только Windows. Варианты: 'win', 'android', 'web'. Без этой строки — везде.
+
+  async mount(root, ctx) {
+    const out = h('pre', { class: 'out' }, 'Пока пусто');
+
+    root.append(
+      panel('Привет',
+        h('p', {}, 'Это пример модуля. Платформа: ' + ctx.platform),
+        button('Нажми', () => { out.textContent = new Date().toString(); toast('Готово'); }, 'primary'),
+        h('div', { class: 'mt' }, out)),
+    );
+
+    // Если нужно что-то убрать при уходе со страницы (таймеры и т.п.) — верните функцию:
+    // const t = setInterval(...); return () => clearInterval(t);
+  },
+};
