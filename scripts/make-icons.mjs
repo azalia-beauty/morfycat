@@ -67,4 +67,4 @@ else {
   const add = entries.filter(e => !cur.includes(e.trim()));
   if (add.length) fs.writeFileSync(col, cur.replace('</resources>', add.join('\n') + '\n</resources>'));
 }
-console.log('иконки записаны: ' + Object.keys(V).length + ' вариантов');
+console.log('иконки записаны: ' + Object.keys(V).length);
