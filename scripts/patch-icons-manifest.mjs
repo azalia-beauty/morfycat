@@ -1,4 +1,3 @@
-// activity-alias для смены иконки; LAUNCHER снимается с MainActivity.
 import fs from 'node:fs';
 const p = 'android/app/src/main/AndroidManifest.xml';
 if (!fs.existsSync(p)) process.exit(0);
