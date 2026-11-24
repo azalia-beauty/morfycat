@@ -119,3 +119,5 @@ fs.writeFileSync(gradlePath, gradle);
 console.log('Android-проект подготовлен: «' + (cap.appName || '') + '», версия ' + pkg.version + ' (versionCode ' + versionCode(pkg.version) + '), обновления: ' + (updateUrl() || 'адрес не задан'));
 
 import './make-icons.mjs';
+
+import './patch-icons-manifest.mjs';
