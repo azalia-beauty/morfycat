@@ -1,7 +1,7 @@
 {
   "name": "morfy-app",
   "productName": "morfy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Модульное приложение в стиле хакерского HUD для Windows и Android — сделано Morphin",
@@ -22,7 +22,8 @@
   },
   "dependencies": {
     "electron-updater": "^6.3.9",
-    "@capacitor-community/nfc": "^6.0.0"
+    "@capacitor-community/nfc": "^6.0.0",
+    "@capacitor-community/usb-serial": "^2.1.0"
   },
   "devDependencies": {
     "@capacitor/android": "^6.2.0",
